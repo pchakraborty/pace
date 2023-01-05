@@ -11,7 +11,7 @@ from gt4py.gtscript import (
 import pace.dsl.gt4py_utils as utils
 import pace.fv3core.stencils.basic_operations as basic
 import pace.stencils.corners as corners
-from pace.dsl.dace.orchestration import orchestrate
+from pace.dsl.dace.orchestration import dace_inhibitor, orchestrate
 from pace.dsl.stencil import StencilFactory, get_stencils_with_varied_bounds
 from pace.dsl.typing import FloatField, FloatFieldIJ, FloatFieldK
 from pace.fv3core.stencils.a2b_ord4 import AGrid2BGridFourthOrder
@@ -27,6 +27,7 @@ def damp_tmp(q, da_min_c, d2_bg, dddmp):
     return damp
 
 
+# TODO: rename this stencil
 def ptc_computation(
     u: FloatField,
     va: FloatField,
@@ -36,9 +37,21 @@ def ptc_computation(
     dyc: FloatFieldIJ,
     sin_sg2: FloatFieldIJ,
     sin_sg4: FloatFieldIJ,
-    ptc: FloatField,
+    ptc: FloatField,  # TODO: rename to u_contra_dyc
 ):
-    """computation of pct"""
+    """
+
+    Args:
+        u (in):
+        va (in):
+        vc (in):
+        cosa_v (in):
+        sina_v (in):
+        dyc (in):
+        sin_sg2 (in):
+        sin_sg4 (in):
+        ptc (out): contravariant u-wind on d-grid
+    """
     from __externals__ import j_end, j_start
 
     with computation(PARALLEL), interval(...):
@@ -47,18 +60,30 @@ def ptc_computation(
             ptc = u * dyc * sin_sg4[0, -1] if vc > 0 else u * dyc * sin_sg2
 
 
+# TODO: rename this stencil
 def vorticity_computation(
     v: FloatField,
     ua: FloatField,
     cosa_u: FloatFieldIJ,
     sina_u: FloatFieldIJ,
     dxc: FloatFieldIJ,
-    vort: FloatField,
+    vort: FloatField,  # TODO: rename to v_contra
     uc: FloatField,
     sin_sg3: FloatFieldIJ,
     sin_sg1: FloatFieldIJ,
 ):
-    """computation of the vorticity"""
+    """
+    Args:
+        v (in):
+        ua (in):
+        cosa_u (in):
+        sina_u (in):
+        dxc (in):
+        vort (out): contravariant v-wind on d-grid
+        uc (in):
+        sin_sg3 (in):
+        sin_sg1 (in):
+    """
     from __externals__ import i_end, i_start
 
     with computation(PARALLEL), interval(...):
@@ -68,21 +93,34 @@ def vorticity_computation(
 
 
 def delpc_computation(
-    ptc: FloatField,
+    u_contra_dxc: FloatField,
     rarea_c: FloatFieldIJ,
-    delpc: FloatField,
-    vort: FloatField,
+    delpc: FloatField,  # TODO: rename to divergence_on_cell_corners
+    v_contra_dyc: FloatField,
 ):
+    """
+    Args:
+        ptc (in): contravariant u-wind on d-grid * dxc
+        rarea_c (in):
+        delpc (out): convergence of wind on cell centers
+        vort (in): contravariant v-wind on d-grid * dyc
+    """
     from __externals__ import i_end, i_start, j_end, j_start
 
     with computation(PARALLEL), interval(...):
-        delpc = vort[0, -1, 0] - vort + ptc[-1, 0, 0] - ptc
+        delpc = (
+            v_contra_dyc[0, -1, 0]
+            - v_contra_dyc
+            + u_contra_dxc[-1, 0, 0]
+            - u_contra_dxc
+        )
 
+    # TODO: why is this not "symmetric", i.e. why is there no corresponding x operation?
     with computation(PARALLEL), interval(...):
         with horizontal(region[i_start, j_start], region[i_end + 1, j_start]):
-            delpc = delpc - vort[0, -1, 0]
+            delpc = delpc - v_contra_dyc[0, -1, 0]
         with horizontal(region[i_start, j_end + 1], region[i_end + 1, j_end + 1]):
-            delpc = delpc + vort
+            delpc = delpc + v_contra_dyc
 
     with computation(PARALLEL), interval(...):
         delpc = rarea_c * delpc
@@ -132,6 +170,11 @@ def get_delpc(
     from __externals__ import i_end, i_start, j_end, j_start
 
     # in the Fortran, u_contra_dyc is called ke and v_contra_dxc is called vort
+    # dual quadrilateral becomes dual triangle, at the corners, so there is
+    # an extraneous term in the divergence calculation. This is always
+    # done using the y-component, though it could be done with either
+    # the y- or x-component (they should be identical).
+    # TODO: draw out a diagram for this and add some docs
 
     with computation(PARALLEL), interval(...):
         # TODO: why does vc_from_va sometimes have different sign than vc?
@@ -183,8 +226,8 @@ def damping(
 ):
     """
     Args:
-        delpc (in):
-        vort (out):
+        delpc (in): divergence at cell corner
+        vort (out): contravariant v-wind on d-grid
         ke (inout):
         d2_bg (in):
     """
@@ -207,12 +250,15 @@ def damping_nord_highorder_stencil(
 ):
     """
     Args:
-        vort (inout):
-        ke (inout):
-        delpc (in):
-        divg_d (in):
-        d2_bg (in):
+        vort (inout): linear combination of second-order and higher-order
+            divergence damping, on output is the damping term itself
+        ke (inout): on input, is the kinetic energy, on output also includes
+            the damping term vort
+        delpc (in): divergence on cell corners
+        divg_d (in): higher-order divergence on d-grid
+        d2_bg (in): background second-order divergence damping coefficient
     """
+    # TODO: propagate variable renaming into this routine
     with computation(PARALLEL), interval(...):
         damp = damp_tmp(vort, da_min_c, d2_bg, dddmp)
         vort = damp * delpc + dd8 * divg_d
@@ -220,11 +266,25 @@ def damping_nord_highorder_stencil(
 
 
 def vc_from_divg(divg_d: FloatField, divg_u: FloatFieldIJ, vc: FloatField):
+    """
+    Args:
+        divg_d (in): divergence on d-grid
+        divg_u (in): metric term, divg_u = sina_v * dyc / dx
+        uv (out): intermediate component of hyperdiffusion defined on
+            same grid as c-grid y-wind
+    """
     with computation(PARALLEL), interval(...):
         vc = (divg_d[1, 0, 0] - divg_d) * divg_u
 
 
 def uc_from_divg(divg_d: FloatField, divg_v: FloatFieldIJ, uc: FloatField):
+    """
+    Args:
+        divg_d (in): divergence on d-grid
+        divg_v (in): metric term, divg_v = sina_u * dxc / dy
+        uc (out): intermediate component of hyperdiffusion defined on
+            same grid as c-grid x-wind
+    """
     with computation(PARALLEL), interval(...):
         uc = (divg_d[0, 1, 0] - divg_d) * divg_v
 
@@ -237,9 +297,11 @@ def redo_divg_d(
 ):
     """
     Args:
-        uc (in):
-        vc (in):
-        divg_d (out):
+        uc (in): intermediate component of hyperdiffusion defined on
+            same grid as c-grid x-wind
+        vc (in): intermediate component of hyperdiffusion defined on
+            same grid as c-grid y-wind
+        divg_d (out): updated divergence for hyperdiffusion on d-grid
         adjustment_factor (in):
     """
     from __externals__ import do_adjustment, i_end, i_start, j_end, j_start
@@ -254,20 +316,21 @@ def redo_divg_d(
             divg_d = divg_d + uc
 
     with computation(PARALLEL), interval(...):
+        # TODO: this does the wrong thing when stretched_grid is True,
+        # i.e. when do_adjustment = not stretched_grid is False
+        # compare to the Fortran and fix
         if __INLINED(do_adjustment):
+            # reference https://github.com/NOAA-GFDL/GFDL_atmos_cubed_sphere/blob/main/model/sw_core.F90#L1422  # noqa: E501
             divg_d = divg_d * adjustment_factor
 
 
 def smagorinksy_diffusion_approx(delpc: FloatField, vort: FloatField, absdt: float):
     """
     Args:
-        delpc (in):
-        vort (inout):
-        absdt (in):
+        delpc (in): divergence on cell corners
+        vort (inout): local eddy diffusivity
+        absdt (in): abs(dt)
     """
-    # TODO: what are these values really? are delpc and vort (as input)
-    # some kind of u and v, and is vort (as output) some kind of kinetic energy?
-    # what does this have to do with diffusion?
     with computation(PARALLEL), interval(...):
         vort = absdt * (delpc ** 2.0 + vort ** 2.0) ** 0.5
 
@@ -301,7 +364,9 @@ class DivergenceDamping:
         # TODO: make dddmp a compile-time external, instead of runtime scalar
         self._dddmp = dddmp
         # TODO: make da_min_c a compile-time external, instead of runtime scalar
-        self._da_min_c = damping_coefficients.da_min_c
+        self._damping_coefficients = damping_coefficients
+        self._stretched_grid = stretched_grid
+        self._d4_bg = d4_bg
         self._grid_type = grid_type
         self._nord_column = nord_col
         self._d2_bg_column = d2_bg
@@ -323,18 +388,21 @@ class DivergenceDamping:
         self._divg_v = damping_coefficients.divg_v
 
         nonzero_nord_k = 0
+        # everything below the sponge layer (k=3 to npz) would use nord, everything
+        # within the sponge layer uses the same higher nord value equal to the
+        # first nonzero value in nord_column
+        # k = 1, 2 nord = 0
+        # k = 3 to npz nord = user speicfied nord
+
+        # refer to https://github.com/NOAA-GFDL/GFDL_atmos_cubed_sphere/blob/main/model/dyn_core.F90#L693  # noqa: E501
+        # for comparison
         self._nonzero_nord = int(nord)
         for k in range(len(self._nord_column)):
             if self._nord_column[k] > 0:
                 nonzero_nord_k = k
                 self._nonzero_nord = int(self._nord_column[k])
                 break
-        if stretched_grid:
-            self._dd8 = damping_coefficients.da_min * d4_bg ** (self._nonzero_nord + 1)
-        else:
-            self._dd8 = (damping_coefficients.da_min_c * d4_bg) ** (
-                self._nonzero_nord + 1
-            )
+
         kstart = nonzero_nord_k
         nk = self.grid_indexing.domain[2] - kstart
         self._do_zero_order = nonzero_nord_k > 0
@@ -475,6 +543,38 @@ class DivergenceDamping:
             compute_halos=(0, 0),
         )
 
+    # We need to use a getter for da_min & da_min_c in order to go around a DaCe inline
+    # behavior. As part of the automatic optimization process, DaCe tries to inline
+    # as many scalars as possible.
+    # The grid is _not_ passed as an input to the top level function we orchestrate,
+    # so its scalar values will be inlined.
+
+    # 'alas, our distributed compilation system works by compiling a 3,3 layout
+    # top tile, then using those 9 caches on every layout upward.
+    # This setup leads to the values of da_min/da_min_c from the 3,3 layout
+    # to be inlined in the generated code. Those variables are used in runtime
+    # calculation (kinetic energy, etc.) which obviously leads to misbehaving numerics
+    # and errors when the 3,3 layout values are used on larger layouts
+
+    # The solution we implement here is making use of the fact that callbacks
+    # are never inlined in dace optimization. the current workaround uses the
+    # following functions.
+
+    # An alternative would be to pass the Grid or the DampingCoefficients to DaCe,
+    # clearly flagging it has a dynamic piece of memory (which would
+    # cancel any inlining) but the feature to do that (dace.struct)
+    # is currently in disarray.
+    # N.B.: another solution is to pass da_min and da_min_c as input, put it seems
+    # odd and adds a lot of boilerplate throughout the model code.
+
+    @dace_inhibitor
+    def _get_da_min_c(self) -> float:
+        return self._damping_coefficients.da_min_c
+
+    @dace_inhibitor
+    def _get_da_min(self) -> float:
+        return self._damping_coefficients.da_min
+
     def __call__(
         self,
         u: FloatField,
@@ -491,25 +591,42 @@ class DivergenceDamping:
         dt: float,
     ):
         """
+        Adds another form of diffusive flux that acts on the divergence field.
+        To apply diffusion you can take the gradient of the divergence field and add
+        it into the components of the velocity equation. This gives
+        second-order diffusion, which is quite diffusive. But if we apply this
+        iteratively, we can get 4th, 6th, 8th, etc. order diffusion.
+
+        Explained in detail in section 8.3 of the FV3 documentation.
+
+        Applies both a background second-order diffusion (with strength controlled by
+        d2_bg passed on init) and a higher-order hyperdiffusion.
+
         Args:
-            u (in):
-            v (in):
+            u (in): x-velocity on d-grid
+            v (in): y-velocity on d-grid
             va (in):
             v_contra_dxc (out): wk converted from a grid to b grid and damped
             ua (in):
-            divg_d (inout):
+            divg_d (inout): finite volume divergence defined on cell corners,
+                output value is not used later in D_SW
             vc (inout):
             uc (inout):
-            delpc (out):
+            delpc (out): finite volume divergence defined on cell corners
             ke (inout): dt times the kinetic energy defined on cell corners,
                 at input time must be accurate for the input winds.
                 Gets updated to remain accurate for the output winds,
                 as described in section 8.3 of the FV3 documentation.
-            wk (in): gets converted by a2b_ord4 and put into v_contra_dxc
+            wk (in): a-grid relative vorticity computed before divergence damping
+                gets converted by a2b_ord4 and put into v_contra_dxc
             dt (in): timestep
         """
+        # TODO: is there anything we can do to APIs to make it clear that divg_d is not
+        #       really an output variable of DivergenceDamping?
         # in the original Fortran, u_contra_dyc is "ptc" and v_contra_dxc is "vort"
+        # TODO: what does do_zero_order signify, why is it false/true?
         if self._do_zero_order:
+            # This is used in the sponge layer, 2nd order damping
             # TODO: delpc is an output of this but is never used. Inside the helper
             # function, use a stencil temporary or temporary storage instead
             self._ptc_computation(
@@ -521,7 +638,7 @@ class DivergenceDamping:
                 self._dyc,
                 self._sin_sg2,
                 self._sin_sg4,
-                self.ptc,
+                self.ptc,  # u_contra_dxc
             )
 
             self._vorticity_computation(
@@ -537,7 +654,7 @@ class DivergenceDamping:
             )
 
             self._delpc_computation(
-                self.ptc,
+                self.ptc,  # u_contra_dxc
                 self._rarea_c,
                 delpc,
                 v_contra_dxc,  # vort
@@ -566,12 +683,13 @@ class DivergenceDamping:
             )
             """
 
+            da_min_c: float = self._get_da_min_c()
             self._damping(
                 delpc,
                 v_contra_dxc,
                 ke,
                 self._d2_bg_column,
-                self._da_min_c,
+                da_min_c,
                 self._dddmp,
                 dt,
             )
@@ -603,19 +721,29 @@ class DivergenceDamping:
             self._set_value(v_contra_dxc, 0.0)
         else:
             # TODO: what is wk/v_contra_dxc here?
+            # take the cell centered relative vorticity and regrid it to cell corners
+            # for smagorinsky diffusion
+            #
             self.a2b_ord4(wk, v_contra_dxc)
             self._smagorinksy_diffusion_approx_stencil(
                 delpc,
                 v_contra_dxc,
                 abs(dt),
             )
+
+        da_min: float = self._get_da_min()
+        if self._stretched_grid:
+            dd8 = da_min * self._d4_bg ** (self._nonzero_nord + 1)
+        else:
+            dd8 = (da_min_c * self._d4_bg) ** (self._nonzero_nord + 1)
+
         self._damping_nord_highorder_stencil(
             v_contra_dxc,
             ke,
             delpc,
             divg_d,
             self._d2_bg_column,
-            self._da_min_c,
+            da_min_c,
             self._dddmp,
-            self._dd8,
+            dd8,
         )

@@ -326,7 +326,6 @@ class FrozenStencil(SDFGConvertible):
                     gt_cache=gt4py.config.cache_settings["dir_name"]
                 ),
             )
-        self._argument_names = tuple(inspect.getfullargspec(func).args)
 
         assert (
             len(self._argument_names) > 0
@@ -589,7 +588,10 @@ class GridIndexing:
     ) -> "GridIndexing":
         # TODO: if this class is refactored to split off the *_edge booleans,
         # this init routine can be refactored to require only a GridSizer
-        domain = sizer.get_extent([pace.util.X_DIM, pace.util.Y_DIM, pace.util.Z_DIM])
+        domain = cast(
+            Tuple[int, int, int],
+            sizer.get_extent([pace.util.X_DIM, pace.util.Y_DIM, pace.util.Z_DIM]),
+        )
         south_edge = cube.tile.partitioner.on_tile_bottom(cube.rank)
         north_edge = cube.tile.partitioner.on_tile_top(cube.rank)
         west_edge = cube.tile.partitioner.on_tile_left(cube.rank)

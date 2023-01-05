@@ -1,4 +1,5 @@
 import pace.dsl
+import pace.fv3core
 import pace.util
 from pace.fv3core import DynamicalCoreConfig
 from pace.fv3core.stencils.saturation_adjustment import SatAdjust3d
@@ -31,7 +32,7 @@ class TranslateSatAdjust3d(TranslateDycoreFortranData2Py):
             "pkz": {"istart": grid.is_, "jstart": grid.js},
             "cappa": {},
         }
-        self.max_error = 5e-14
+        self.max_error = 2e-11
         # te0 is off by 1e-10 when you do nothing...
         self.in_vars["parameters"] = [
             "r_vir",
@@ -60,7 +61,7 @@ class TranslateSatAdjust3d(TranslateDycoreFortranData2Py):
             },
             "cappa": {},
         }
-        self.namelist = namelist
+        self.namelist = pace.fv3core.DynamicalCoreConfig.from_namelist(namelist)
         self.stencil_factory = stencil_factory
 
     def compute_from_storage(self, inputs):

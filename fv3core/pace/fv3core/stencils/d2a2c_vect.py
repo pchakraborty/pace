@@ -231,6 +231,11 @@ def contravariant(v1, v2, cosa, rsin2):
     the contravariant component is equal to the covariant component.
     However, the gnomonic cubed sphere grid is not orthogonal.
 
+    This equation is only valid within the tile. On the edge of
+    a tile, it has this simpler form:
+
+    u_contra = u / sin(alpha) at the edges
+
     Args:
         v1: covariant component of the wind for which we want to get the
             contravariant component
@@ -385,7 +390,7 @@ class DGrid2AGrid2CGridVectors:
         grid_type: int,
         dord4: bool,
     ):
-        orchestrate(self, config=stencil_factory.config.dace_config)
+        orchestrate(obj=self, config=stencil_factory.config.dace_config)
 
         grid_indexing = stencil_factory.grid_indexing
         self._cosa_s = grid_data.cosa_s

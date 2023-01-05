@@ -91,7 +91,7 @@ class HyperdiffusionDamping:
         Args:
             grid: fv3core grid object
         """
-        orchestrate(self, stencil_factory.config.dace_config)
+        orchestrate(obj=self, config=stencil_factory.config.dace_config)
         grid_indexing = stencil_factory.grid_indexing
         self._del6_u = damping_coefficients.del6_u
         self._del6_v = damping_coefficients.del6_v
@@ -162,7 +162,7 @@ class HyperdiffusionDamping:
 
     def __call__(self, qdel: FloatField, cd: float):
         """
-        Perform hyperdiffusion damping/filtering
+        Perform hyperdiffusion damping/filtering.
 
         Args:
             qdel (inout): Variable to be filtered

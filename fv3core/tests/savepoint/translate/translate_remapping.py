@@ -82,7 +82,6 @@ class TranslateRemapping(TranslateDycoreFortranData2Py):
             "consv_te",
             "mdt",
             "bdt",
-            "do_adiabatic_init",
             "nq",
         ]
         self.out_vars = {}
@@ -114,7 +113,7 @@ class TranslateRemapping(TranslateDycoreFortranData2Py):
         self.near_zero = 3e-18
         self.ignore_near_zero_errors = {"q_con": True, "tracers": True}
         self.stencil_factory = stencil_factory
-        self.namelist = namelist
+        self.namelist = DynamicalCoreConfig.from_namelist(namelist)
 
     def compute_from_storage(self, inputs):
         wsd_2d = utils.make_storage_from_shape(

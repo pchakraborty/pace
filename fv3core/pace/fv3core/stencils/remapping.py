@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Optional
 
 from gt4py.gtscript import (
     __INLINED,
@@ -15,6 +15,7 @@ from gt4py.gtscript import (
 
 import pace.dsl.gt4py_utils as utils
 import pace.fv3core.stencils.moist_cv as moist_cv
+import pace.util
 from pace.dsl.dace.orchestration import orchestrate
 from pace.dsl.stencil import StencilFactory
 from pace.dsl.typing import FloatField, FloatFieldIJ, FloatFieldK
@@ -71,6 +72,8 @@ def undo_delz_adjust_and_copy_peln(
         peln = pn2
 
 
+# TODO: some of the intermediate values here are not really output
+# values, and can be refactored into stencil temporaries (e.g. cvm)
 def moist_cv_pt_pressure(
     qvapor: FloatField,
     qliquid: FloatField,
@@ -96,6 +99,8 @@ def moist_cv_pt_pressure(
     r_vir: float,
 ):
     """
+    Computes Eulerian reference pressures as targets for remapping.
+
     Args:
         qvapor (in):
         qliquid (in):
@@ -150,6 +155,9 @@ def moist_cv_pt_pressure(
     with computation(PARALLEL):
         with interval(0, 1):
             pn2 = peln
+        # TODO: refactor the pe2 = ptop assignment from
+        # previous stencil into this one, and remove
+        # pe2 from the other stencil
         with interval(1, -1):
             pe2 = ak + bk * ps
         with interval(-1, None):
@@ -286,12 +294,17 @@ class LagrangianToEulerian:
         nq,
         pfull,
         tracers: Dict[str, Quantity],
+        checkpointer: Optional[pace.util.Checkpointer] = None,
     ):
         orchestrate(
             obj=self,
             config=stencil_factory.config.dace_config,
-            dace_constant_args=["tracers"],
+            dace_compiletime_args=["tracers"],
         )
+        self._checkpointer = checkpointer
+        # this is only computed in init because Dace does not yet support
+        # this operation
+        self._call_checkpointer = checkpointer is not None
         grid_indexing = stencil_factory.grid_indexing
         if config.kord_tm >= 0:
             raise NotImplementedError("map ppm, untested mode where kord_tm >= 0")
@@ -494,8 +507,8 @@ class LagrangianToEulerian:
         u: FloatField,
         v: FloatField,
         w: FloatField,
-        ua: FloatField,
-        va: FloatField,
+        ua: FloatField,  # TODO: remove this arg and use an internal temporary instead
+        va: FloatField,  # TODO: remove unused arg
         cappa: FloatField,
         q_con: FloatField,
         q_cld: FloatField,
@@ -503,13 +516,13 @@ class LagrangianToEulerian:
         pk: FloatField,
         pe: FloatField,
         hs: FloatFieldIJ,
-        te0_2d: FloatFieldIJ,
+        te0_2d: FloatFieldIJ,  # TODO: remove unused arg
         ps: FloatFieldIJ,
         wsd: FloatFieldIJ,
-        omga: FloatField,
+        omga: FloatField,  # TODO: remove unused arg
         ak: FloatFieldK,
         bk: FloatFieldK,
-        pfull: FloatFieldK,
+        pfull: FloatFieldK,  # TODO: remove unused arg
         dp1: FloatField,
         ptop: float,
         akap: float,
@@ -517,51 +530,54 @@ class LagrangianToEulerian:
         last_step: bool,
         consv_te: float,
         mdt: float,
-        bdt: float,
-        do_adiabatic_init: bool,
+        bdt: float,  # TODO: remove unused arg
     ):
         """
-        tracers (inout): Tracer species tracked across
-        pt (inout): D-grid potential temperature
-        delp (inout): Pressure Thickness
-        delz (in): Vertical thickness of atmosphere layers
-        peln (inout): Logarithm of interface pressure
-        u (inout): D-grid x-velocity
-        v (inout): D-grid y-velocity
-        w (inout): Vertical velocity
-        ua (inout): A-grid x-velocity
-        va (inout): A-grid y-velocity
-        cappa (inout): Power to raise pressure to
-        q_con (out): Total condensate mixing ratio
-        q_cld (out): Cloud fraction
-        pkz (in): Layer mean pressure raised to the power of Kappa
-        pk (out): Interface pressure raised to power of kappa, final acoustic value
-        pe (in): Pressure at layer edges
-        hs (in): Surface geopotential
-        te0_2d (unused): Atmosphere total energy in columns
-        ps (out): Surface pressure
-        wsd (in): Vertical velocity of the lowest level
-        omga (unused): Vertical pressure velocity
-        ak (in): Atmosphere hybrid a coordinate (Pa)
-        bk (in): Atmosphere hybrid b coordinate (dimensionless)
-        pfull (in): Pressure full levels
-        dp1 (out): Pressure thickness before dyn_core (only written
-            if do_sat_adjust=True)
-        ptop (in): The pressure level at the top of atmosphere
-        akap (in): Poisson constant (KAPPA)
-        zvir (in): Constant (Rv/Rd-1)
-        last_step (in): Flag for the last step of k-split remapping
-        consv_te (in): If True, conserve total energy
-        mdt (in) : Remap time step
-        bdt (in): Timestep
-        do_adiabatic_init (in): If True, do adiabatic dynamics
-
         Remap the deformed Lagrangian surfaces onto the reference, or "Eulerian",
         coordinate levels.
+
+        Args:
+            tracers (inout): Tracer species tracked across
+            pt (inout): D-grid potential temperature
+            delp (inout): Pressure Thickness
+            delz (in): Vertical thickness of atmosphere layers
+            peln (inout): Logarithm of interface pressure
+            u (inout): D-grid x-velocity
+            v (inout): D-grid y-velocity
+            w (inout): Vertical velocity
+            ua (inout): A-grid x-velocity
+            va (inout): A-grid y-velocity
+            cappa (inout): Power to raise pressure to
+            q_con (out): Total condensate mixing ratio
+            q_cld (out): Cloud fraction
+            pkz (in): Layer mean pressure raised to the power of Kappa
+            pk (out): Interface pressure raised to power of kappa, final acoustic value
+            pe (in): Pressure at layer edges
+            hs (in): Surface geopotential
+            te0_2d (unused): Atmosphere total energy in columns
+            ps (out): Surface pressure
+            wsd (in): Vertical velocity of the lowest level
+            omga (unused): Vertical pressure velocity
+            ak (in): Atmosphere hybrid a coordinate (Pa)
+            bk (in): Atmosphere hybrid b coordinate (dimensionless)
+            pfull (in): Pressure full levels
+            dp1 (out): Pressure thickness before dyn_core (only written
+                if do_sat_adjust=True)
+            ptop (in): The pressure level at the top of atmosphere
+            akap (in): Poisson constant (KAPPA)
+            zvir (in): Constant (Rv/Rd-1)
+            last_step (in): Flag for the last step of k-split remapping
+            consv_te (in): If True, conserve total energy
+            mdt (in) : Remap time step
+            bdt (in): Timestep
         """
         # TODO: remove unused arguments (and commented code that references them)
         # TODO: can we trim ps or make it a temporary
+        # TODO: pe is copied into pe1 and pe2 for vectorization reasons in the Fortran,
+        # we should be able to refactor them away in this version
         self._init_pe(pe, self._pe1, self._pe2, ptop)
+        # pe1 is initial lagrangian edge pressures
+        # pe2 is final Eulerian edge pressures
 
         self._moist_cv_pt_pressure(
             tracers["qvapor"],
@@ -590,6 +606,7 @@ class LagrangianToEulerian:
 
         self._pn2_pk_delp(self._dp2, delp, self._pe2, self._pn2, pk, akap)
 
+        # now that we have the pressure profiles, we can start remapping
         self._map_single_pt(pt, peln, self._pn2, qmin=self._t_min)
 
         # TODO if self._nq > 5:
@@ -604,6 +621,9 @@ class LagrangianToEulerian:
         # if do_omega:  # NOTE untested
         #    pe3 = copy(omga, origin=(grid_indexing.isc, grid_indexing.jsc, 1))
 
+        # TODO: can we move this to after the rest of the remapping calls, to make
+        # it clear the outputs are not needed until then?
+        # or, are its outputs actually used? can we delete this stencil call?
         self._moist_cv_pkz(
             tracers["qvapor"],
             tracers["qliquid"],
@@ -636,7 +656,7 @@ class LagrangianToEulerian:
 
         self._copy_from_below_stencil(ua, pe)
         dtmp = 0.0
-        if last_step and not do_adiabatic_init:
+        if last_step:
             if consv_te > CONSV_MIN:
                 raise NotImplementedError(
                     "We do not support consv_te > 0.001 "
@@ -652,7 +672,7 @@ class LagrangianToEulerian:
                 )
 
         if self._do_sat_adjust:
-            fast_mp_consv = not do_adiabatic_init and consv_te > CONSV_MIN
+            fast_mp_consv = consv_te > CONSV_MIN
             self._saturation_adjustment(
                 dp1,
                 tracers["qvapor"],
@@ -679,6 +699,10 @@ class LagrangianToEulerian:
             )
 
         if last_step:
+
+            # on the last step, we need the regular temperature to send
+            # to the physics, but if we're staying in dynamics we need
+            # to keep it as the virtual potential temperature
             self._moist_cv_last_step_stencil(
                 tracers["qvapor"],
                 tracers["qliquid"],
@@ -693,4 +717,5 @@ class LagrangianToEulerian:
                 zvir,
             )
         else:
+            # converts virtual temperature back to virtual potential temperature
             self._basic_adjust_divide_stencil(pkz, pt)

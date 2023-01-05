@@ -2,8 +2,8 @@ from typing import List, Optional, Tuple
 
 from dace.sdfg import SDFG
 
+import pace.util
 from pace.dsl.dace.dace_config import DaceConfig, DaCeOrchestration
-from pace.util import TilePartitioner
 
 
 ################################################
@@ -30,7 +30,7 @@ def unblock_waiting_tiles(comm, sdfg_path: str) -> None:
             comm.send(sdfg_path, dest=tile * tilesize + comm.Get_rank())
 
 
-def get_target_rank(rank: int, partitioner: TilePartitioner):
+def get_target_rank(rank: int, partitioner: pace.util.CubedSpherePartitioner):
     """From my rank & the current partitioner we determine which
     rank we should read from.
     For all layout >= 3,3 this presumes build has been done on a
@@ -77,7 +77,7 @@ def build_info_filepath() -> str:
 
 
 def write_build_info(
-    sdfg: SDFG, layout: Tuple[int], resolution_per_tile: List[int], backend: str
+    sdfg: SDFG, layout: Tuple[int, int], resolution_per_tile: List[int], backend: str
 ):
     """Write down all relevant information on the build to identify
     it at load time."""
@@ -170,7 +170,9 @@ def get_sdfg_path(
             )
         # Check resolution per tile
         build_resolution = ast.literal_eval(build_info_file.readline())
-        if config.tile_resolution != build_resolution:
+        if (config.tile_resolution[0] / config.layout[0]) != (
+            build_resolution[0] / build_layout[0]
+        ):
             raise RuntimeError(
                 f"SDFG build for resolution {build_resolution}, "
                 f"cannot be run with current resolution {config.tile_resolution}"

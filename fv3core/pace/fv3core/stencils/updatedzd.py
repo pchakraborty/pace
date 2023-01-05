@@ -3,6 +3,7 @@ from gt4py.gtscript import BACKWARD, FORWARD, PARALLEL, computation, interval
 
 import pace.dsl.gt4py_utils as utils
 import pace.util.constants as constants
+from pace.dsl.dace.orchestration import orchestrate
 from pace.dsl.stencil import GridIndexing, StencilFactory
 from pace.dsl.typing import FloatField, FloatFieldIJ, FloatFieldK
 from pace.fv3core.stencils.delnflux import DelnFluxNoSG
@@ -207,6 +208,10 @@ class UpdateHeightOnDGrid:
                 can be used as an approximation
             column_namelist: dictionary of parameter columns
         """
+        orchestrate(
+            obj=self,
+            config=stencil_factory.config.dace_config,
+        )
         grid_indexing = stencil_factory.grid_indexing
         self.grid_indexing = grid_indexing
         self._area = grid_data.area
@@ -245,11 +250,6 @@ class UpdateHeightOnDGrid:
             origin=grid_indexing.origin_compute(),
             domain=grid_indexing.domain_compute(add=(0, 0, 1)),
         )
-        # self._set_nans = get_set_nan_func(
-        #     grid_indexing,
-        #     dims=[pace.util.X_DIM, pace.util.Y_DIM, pace.util.Z_DIM],
-        #     n_halo=((0, 0), (0, 0)),
-        # )
 
     def _allocate_temporary_storages(self, grid_indexing: GridIndexing, backend: str):
         largest_possible_shape = grid_indexing.domain_full(add=(1, 1, 1))
@@ -366,6 +366,8 @@ class UpdateHeightOnDGrid:
         self._interpolate_to_layer_interface(
             y_area_flux, self._y_area_flux_interface, self._gk, self._beta, self._gamma
         )
+
+        # compute fluxes
         self.finite_volume_transport(
             height,
             self._crx_interface,
@@ -378,6 +380,7 @@ class UpdateHeightOnDGrid:
 
         # TODO: in theory, we should check if damp_vt > 1e-5 for each k-level and
         # only compute for k-levels where this is true
+        # compute diffusive component of fluxes
         self.delnflux(
             height,
             self._height_x_diffusive_flux,
@@ -398,4 +401,3 @@ class UpdateHeightOnDGrid:
             ws,
             dt,
         )
-        # self._set_nans(height)

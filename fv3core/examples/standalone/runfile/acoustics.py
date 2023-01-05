@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# type: ignore
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -180,6 +181,7 @@ def driver(
             dycore_config.acoustic_dynamics,
             input_data["pfull"],
             input_data["phis"],
+            input_data["wsd"],
             state,
         )
 
