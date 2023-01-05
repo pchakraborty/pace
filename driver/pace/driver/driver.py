@@ -392,6 +392,7 @@ class Driver:
             self.comm = global_comm
             stencil_compare_comm = None
         self.performance_collector = self.config.performance_config.build(self.comm)
+        self.profiler = self.config.performance_config.build_profiler()
         with self.performance_collector.total_timer.clock("initialization"):
             communicator = CubedSphereCommunicator.from_layout(
                 comm=self.comm, layout=self.config.layout
@@ -470,6 +471,7 @@ class Driver:
                 comm=communicator,
                 grid_data=self.state.grid_data,
                 stencil_factory=self.stencil_factory,
+                quantity_factory=self.quantity_factory,
                 damping_coefficients=self.state.damping_coefficients,
                 config=self.config.dycore_config,
                 timestep=self.config.timestep,
@@ -490,6 +492,7 @@ class Driver:
             if not config.disable_step_physics:
                 self.dycore_to_physics = update_atmos_state.DycoreToPhysics(
                     stencil_factory=self.stencil_factory,
+                    quantity_factory=self.quantity_factory,
                     dycore_config=self.config.dycore_config,
                     do_dry_convective_adjust=config.do_dry_convective_adjustment,
                     dycore_only=self.config.dycore_only,
@@ -596,10 +599,15 @@ class Driver:
     def step_all(self):
         logger.info("integrating driver forward in time")
         with self.performance_collector.total_timer.clock("total"):
+            self.profiler.enable()
             self._critical_path_step_all(
                 steps_count=self.config.n_timesteps(),
                 timer=self.performance_collector.timestep_timer,
                 dt=self.config.timestep.total_seconds(),
+            )
+            self.profiler.dump_stats(
+                f"{self.config.performance_config.experiment_name}_\
+                {self.comm.Get_rank()}.prof"
             )
 
     def _step_dynamics(
