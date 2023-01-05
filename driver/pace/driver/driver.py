@@ -1,12 +1,13 @@
 import dataclasses
 import functools
 import logging
-import os
+import warnings
 from datetime import datetime, timedelta
-from typing import Any, Dict, Tuple, Union
+from math import floor
+from typing import Any, Dict, List, Tuple, Union
 
+import dace
 import dacite
-import yaml
 
 import fv3core
 import fv3gfs.physics
@@ -15,9 +16,14 @@ import pace.dsl
 import pace.stencils
 import pace.util
 import pace.util.grid
+from fv3core.initialization.dycore_state import DycoreState
+from pace.dsl.dace.dace_config import DaceConfig
+from pace.dsl.dace.orchestration import dace_inhibitor, orchestrate
+from pace.dsl.stencil_config import CompilationConfig, RunMode
 
 # TODO: move update_atmos_state into pace.driver
 from pace.stencils import update_atmos_state
+from pace.util.communicator import CubedSphereCommunicator
 
 from . import diagnostics
 from .comm import CreatesCommSelector
@@ -59,6 +65,12 @@ class DriverConfig:
             in a later commit.
         save_restart: whether to save the state output as restart files at
             cleanup time
+        pair_debug: if True, runs two copies of the model each using
+            half of the available MPI ranks, and compares results across these two
+            copies during model execution, raising an exception if results ever
+            differ. This is considerably more expensive since all model data must
+            be communicated at the start and end of every stencil call.
+        intermediate_restart: list of time steps to save intermediate restart files
     """
 
     stencil_config: pace.dsl.StencilConfig
@@ -89,6 +101,8 @@ class DriverConfig:
     dycore_only: bool = False
     disable_step_physics: bool = False
     save_restart: bool = False
+    pair_debug: bool = False
+    intermediate_restart: List[int] = dataclasses.field(default_factory=list)
 
     @functools.cached_property
     def timestep(self) -> timedelta:
@@ -103,6 +117,15 @@ class DriverConfig:
         return timedelta(
             days=self.days, hours=self.hours, minutes=self.minutes, seconds=self.seconds
         )
+
+    def n_timesteps(self) -> int:
+        """Computing how many timestep required to carry the simulation."""
+        if self.total_time < self.timestep:
+            warnings.warn(
+                f"No simulation possible: you asked for {self.total_time} "
+                f"simulation time but the timestep is {self.timestep}"
+            )
+        return floor(self.total_time.total_seconds() / self.timestep.total_seconds())
 
     @functools.cached_property
     def do_dry_convective_adjustment(self) -> bool:
@@ -154,6 +177,23 @@ class DriverConfig:
             kwargs["initialization"]
         )
 
+        if (
+            isinstance(kwargs["stencil_config"], dict)
+            and "dace_config" in kwargs["stencil_config"].keys()
+        ):
+            kwargs["stencil_config"]["dace_config"] = DaceConfig.from_dict(
+                data=kwargs["stencil_config"]["dace_config"]
+            )
+        if (
+            isinstance(kwargs["stencil_config"], dict)
+            and "compilation_config" in kwargs["stencil_config"].keys()
+        ):
+            kwargs["stencil_config"][
+                "compilation_config"
+            ] = CompilationConfig.from_dict(
+                data=kwargs["stencil_config"]["compilation_config"]
+            )
+
         return dacite.from_dict(
             data_class=cls, data=kwargs, config=dacite.Config(strict=True)
         )
@@ -172,17 +212,77 @@ class Driver:
             comm: communication object behaving like mpi4py.Comm
         """
         logger.info("initializing driver")
-        self.config = config
+        self.config: DriverConfig = config
         self.time = self.config.start_time
         self.comm_config = config.comm_config
-        self.comm = config.comm_config.get_comm()
+        global_comm = config.comm_config.get_comm()
+        if config.pair_debug:
+            world = int(global_comm.Get_rank() >= (global_comm.Get_size() // 2))
+            self.comm = global_comm.Split(color=world, key=global_comm.Get_rank())
+            stencil_compare_comm = global_comm
+        else:
+            self.comm = global_comm
+            stencil_compare_comm = None
         self.performance_config = self.config.performance_config
         with self.performance_config.total_timer.clock("initialization"):
-            communicator = pace.util.CubedSphereCommunicator.from_layout(
+            communicator = CubedSphereCommunicator.from_layout(
                 comm=self.comm, layout=self.config.layout
             )
+            self.update_driver_config_with_communicator(communicator)
+
+            if self.config.stencil_config.compilation_config.run_mode == RunMode.Build:
+
+                def exit_function(*args, **kwargs):
+                    print(
+                        "Running in build-only mode and compilation finished, exiting"
+                    )
+                    exit(0)
+
+                setattr(self, "step_all", exit_function)
+            elif self.config.stencil_config.compilation_config.run_mode == RunMode.Run:
+
+                def exit_instead_of_build(self):
+                    stencil_class = (
+                        None if self.options.rebuild else self.backend.load()
+                    )
+                    if stencil_class is None:
+                        raise RuntimeError(
+                            "Stencil needs to be compiled first in run mode, exiting"
+                        )
+                    return stencil_class
+
+                from gt4py.stencil_builder import StencilBuilder
+
+                setattr(StencilBuilder, "build", exit_instead_of_build)
+
+            self.config.stencil_config.dace_config = DaceConfig(
+                communicator=communicator,
+                backend=self.config.stencil_config.backend,
+                tile_nx=self.config.nx_tile,
+                tile_nz=self.config.nz,
+            )
+            orchestrate(
+                obj=self,
+                config=self.config.stencil_config.dace_config,
+                method_to_orchestrate="_critical_path_step_all",
+                dace_constant_args=["timer"],
+            )
+            orchestrate(
+                obj=self,
+                config=self.config.stencil_config.dace_config,
+                method_to_orchestrate="_step_dynamics",
+                dace_constant_args=["state", "timer"],
+            )
+            orchestrate(
+                obj=self,
+                config=self.config.stencil_config.dace_config,
+                method_to_orchestrate="_step_physics",
+            )
+
             self.quantity_factory, self.stencil_factory = _setup_factories(
-                config=config, communicator=communicator
+                config=config,
+                communicator=communicator,
+                stencil_compare_comm=stencil_compare_comm,
             )
 
             self.state = self.config.initialization.get_driver_state(
@@ -196,33 +296,56 @@ class Driver:
                 damping_coefficients=self.state.damping_coefficients,
                 config=self.config.dycore_config,
                 phis=self.state.dycore_state.phis,
+                state=self.state.dycore_state,
             )
 
-            self.physics = fv3gfs.physics.Physics(
-                stencil_factory=self.stencil_factory,
-                grid_data=self.state.grid_data,
-                namelist=self.config.physics_config,
-                active_packages=["microphysics"],
+            self.dycore.update_state(
+                conserve_total_energy=self.config.dycore_config.consv_te,
+                do_adiabatic_init=False,
+                timestep=self.config.timestep.total_seconds(),
+                n_split=self.config.dycore_config.n_split,
+                state=self.state.dycore_state,
             )
-            self.dycore_to_physics = update_atmos_state.DycoreToPhysics(
-                stencil_factory=self.stencil_factory,
-                dycore_config=self.config.dycore_config,
-                do_dry_convective_adjustment=self.config.do_dry_convective_adjustment,
-                dycore_only=self.config.dycore_only,
-            )
-            self.end_of_step_update = update_atmos_state.UpdateAtmosphereState(
-                stencil_factory=self.stencil_factory,
-                grid_data=self.state.grid_data,
-                namelist=self.config.physics_config,
-                comm=communicator,
-                grid_info=self.state.driver_grid_data,
-                quantity_factory=self.quantity_factory,
-                dycore_only=self.config.dycore_only,
-                apply_tendencies=self.config.apply_tendencies,
-            )
+            if not config.dycore_only and not config.disable_step_physics:
+                self.physics = fv3gfs.physics.Physics(
+                    stencil_factory=self.stencil_factory,
+                    grid_data=self.state.grid_data,
+                    namelist=self.config.physics_config,
+                    active_packages=["microphysics"],
+                )
+            else:
+                # Make sure those are set to None to raise any issues
+                self.physics = None
+            if not config.disable_step_physics:
+                self.dycore_to_physics = update_atmos_state.DycoreToPhysics(
+                    stencil_factory=self.stencil_factory,
+                    dycore_config=self.config.dycore_config,
+                    do_dry_convective_adjust=config.do_dry_convective_adjustment,
+                    dycore_only=self.config.dycore_only,
+                )
+                self.end_of_step_update = update_atmos_state.UpdateAtmosphereState(
+                    stencil_factory=self.stencil_factory,
+                    grid_data=self.state.grid_data,
+                    namelist=self.config.physics_config,
+                    comm=communicator,
+                    grid_info=self.state.driver_grid_data,
+                    state=self.state.dycore_state,
+                    quantity_factory=self.quantity_factory,
+                    dycore_only=self.config.dycore_only,
+                    apply_tendencies=self.config.apply_tendencies,
+                    tendency_state=self.state.tendency_state,
+                )
+            else:
+                # Make sure those are set to None to raise any issues
+                self.dycore_to_physics = None
+                self.end_of_step_update = None
             self.diagnostics = config.diagnostics_config.diagnostics_factory(
                 partitioner=communicator.partitioner,
                 comm=self.comm,
+            )
+            self.restart = pace.driver.Restart(
+                save_restart=self.config.save_restart,
+                intermediate_restart=self.config.intermediate_restart,
             )
         log_subtile_location(
             partitioner=communicator.partitioner.tile, rank=communicator.rank
@@ -231,31 +354,108 @@ class Driver:
             grid_data=self.state.grid_data,
             metadata=self.state.dycore_state.ps.metadata,
         )
+        if config.diagnostics_config.output_initial_state:
+            self.diagnostics.store(time=self.time, state=self.state)
+
+        self._time_run = self.config.start_time
+
+    def update_driver_config_with_communicator(
+        self, communicator: CubedSphereCommunicator
+    ) -> None:
+        dace_config = DaceConfig(
+            communicator=communicator,
+            backend=self.config.stencil_config.compilation_config.backend,
+            tile_nx=self.config.nx_tile,
+            tile_nz=self.config.nz,
+        )
+        self.config.stencil_config.dace_config = dace_config
+        original_config = self.config.stencil_config.compilation_config
+        compilation_config = CompilationConfig(
+            backend=original_config.backend,
+            rebuild=original_config.rebuild,
+            validate_args=original_config.validate_args,
+            format_source=original_config.format_source,
+            device_sync=original_config.device_sync,
+            run_mode=original_config.run_mode,
+            use_minimal_caching=original_config.use_minimal_caching,
+            communicator=communicator,
+        )
+        self.config.stencil_config.compilation_config = compilation_config
+
+    @dace_inhibitor
+    def _callback_diagnostics(self):
+        self._time_run += self.config.timestep
+        self.diagnostics.store(time=self._time_run, state=self.state)
+
+    @dace_inhibitor
+    def _callback_restart(self, restart_path: str):
+        self.restart.save_state_as_restart(
+            state=self.state,
+            comm=self.comm,
+            restart_path=restart_path,
+        )
+        self.restart.write_restart_config(
+            comm=self.comm,
+            time=self.time,
+            driver_config=self.config,
+            restart_path=restart_path,
+        )
+
+    @dace_inhibitor
+    def end_of_step_actions(self, step: int):
+        """Gather operations unrelated to computation.
+        Using a function allows those actions to be removed from the orchestration path.
+        """
+        if __debug__:
+            logger.info(f"Finished stepping {step}")
+        self.time += self.config.timestep
+        if not ((step + 1) % self.config.diagnostics_config.output_frequency):
+            self.diagnostics.store(time=self.time, state=self.state)
+        if (
+            self.restart.save_intermediate_restart
+            and step in self.config.intermediate_restart
+        ):
+            self._write_restart_files(restart_path=f"RESTART_{step}")
+        self.performance_config.collect_performance()
+
+    def _critical_path_step_all(
+        self,
+        steps_count: int,
+        timer: pace.util.Timer,
+        dt: float,
+    ):
+        """Start of code path where performance is critical.
+
+        This function must remain orchestrateable by DaCe (e.g.
+        all code not parsable due to python complexity needs to be moved
+        to a callback, like end_of_step_actions)."""
+        for step in dace.nounroll(range(steps_count)):
+            with timer.clock("mainloop"):
+                self._step_dynamics(
+                    self.state.dycore_state,
+                    self.performance_config.timestep_timer,
+                )
+                if not self.config.disable_step_physics:
+                    self._step_physics(timestep=dt)
+            self.end_of_step_actions(step)
 
     def step_all(self):
         logger.info("integrating driver forward in time")
         with self.performance_config.total_timer.clock("total"):
-            end_time = self.config.start_time + self.config.total_time
-            while self.time < end_time:
-                self.step(timestep=self.config.timestep)
+            self._critical_path_step_all(
+                steps_count=self.config.n_timesteps(),
+                timer=self.performance_config.timestep_timer,
+                dt=self.config.timestep.total_seconds(),
+            )
 
-    def step(self, timestep: timedelta):
-        with self.performance_config.timestep_timer.clock("mainloop"):
-            self._step_dynamics(timestep=timestep.total_seconds())
-            if not self.config.disable_step_physics:
-                self._step_physics(timestep=timestep.total_seconds())
-        self.time += timestep
-        self.diagnostics.store(time=self.time, state=self.state)
-        self.performance_config.collect_performance()
-
-    def _step_dynamics(self, timestep: float):
+    def _step_dynamics(
+        self,
+        state: DycoreState,
+        timer: pace.util.Timer,
+    ):
         self.dycore.step_dynamics(
-            state=self.state.dycore_state,
-            conserve_total_energy=self.config.dycore_config.consv_te,
-            n_split=self.config.dycore_config.n_split,
-            do_adiabatic_init=False,
-            timestep=float(timestep),
-            timer=self.performance_config.timestep_timer,
+            state=state,
+            timer=timer,
         )
 
     def _step_physics(self, timestep: float):
@@ -270,33 +470,33 @@ class Driver:
         self.end_of_step_update(
             dycore_state=self.state.dycore_state,
             phy_state=self.state.physics_state,
-            tendency_state=self.state.tendency_state,
+            u_dt=self.state.tendency_state.u_dt.storage,
+            v_dt=self.state.tendency_state.v_dt.storage,
+            pt_dt=self.state.tendency_state.pt_dt.storage,
             dt=float(timestep),
         )
 
     def _write_performance_json_output(self):
         self.performance_config.write_out_performance(
             self.comm,
-            self.config.stencil_config.backend,
+            self.config.stencil_config.compilation_config.backend,
+            self.config.stencil_config.dace_config.is_dace_orchestrated(),
             self.config.dt_atmos,
         )
 
-    def _write_restart_files(self):
-        self.state.save_state(comm=self.comm)
-        if self.comm.Get_rank() == 0:
-            config_dict = dataclasses.asdict(self.config)
-            config_dict["performance_config"].pop("times_per_step", None)
-            config_dict["performance_config"].pop("hits_per_step", None)
-            config_dict["performance_config"].pop("timestep_timer", None)
-            config_dict["performance_config"].pop("total_timer", None)
-            for field in ["dt_atmos", "layout", "npx", "npy", "npz", "ntiles"]:
-                config_dict["dycore_config"].pop(field, None)
-                config_dict["physics_config"].pop(field, None)
-            config_dict["initialization"]["type"] = "restart"
-            config_dict["initialization"]["config"]["start_time"] = self.time
-            config_dict["initialization"]["config"]["path"] = f"{os.getcwd()}/RESTART"
-            with open("RESTART/restart.yaml", "w") as file:
-                yaml.safe_dump(config_dict, file)
+    @dace_inhibitor
+    def _write_restart_files(self, restart_path="RESTART"):
+        self.restart.save_state_as_restart(
+            state=self.state,
+            comm=self.comm,
+            restart_path=restart_path,
+        )
+        self.restart.write_restart_config(
+            comm=self.comm,
+            time=self.time,
+            driver_config=self.config,
+            restart_path=restart_path,
+        )
 
     def cleanup(self):
         logger.info("cleaning up driver")
@@ -317,8 +517,23 @@ def log_subtile_location(partitioner: pace.util.TilePartitioner, rank: int):
 
 
 def _setup_factories(
-    config: DriverConfig, communicator: pace.util.CubedSphereCommunicator
+    config: DriverConfig,
+    communicator: pace.util.CubedSphereCommunicator,
+    stencil_compare_comm,
 ) -> Tuple["pace.util.QuantityFactory", "pace.dsl.StencilFactory"]:
+    """
+    Args:
+        config: configuration of driver
+        communicator: performs communication needed for grid initialization
+        stencil_compare_comm: if given, all stencils created by the returned factory
+            will compare data to its "pair" rank before and after every stencil call,
+            used for debugging in "pair_debug" mode.
+
+    Returns:
+        quantity_factory: creates Quantities
+        stencil_factory: creates Stencils
+    """
+
     sizer = pace.util.SubtileGridSizer.from_tile_params(
         nx_tile=config.nx_tile,
         ny_tile=config.nx_tile,
@@ -334,10 +549,11 @@ def _setup_factories(
         sizer=sizer, cube=communicator
     )
     quantity_factory = pace.util.QuantityFactory.from_backend(
-        sizer, backend=config.stencil_config.backend
+        sizer, backend=config.stencil_config.compilation_config.backend
     )
     stencil_factory = pace.dsl.StencilFactory(
         config=config.stencil_config,
         grid_indexing=grid_indexing,
+        comm=stencil_compare_comm,
     )
     return quantity_factory, stencil_factory

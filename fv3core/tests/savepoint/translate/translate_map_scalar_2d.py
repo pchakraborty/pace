@@ -3,12 +3,8 @@ from typing import Any, Dict
 import pace.dsl
 import pace.dsl.gt4py_utils as utils
 import pace.util
-from fv3core.testing import MapSingleFactory
-from pace.stencils.testing import (
-    TranslateDycoreFortranData2Py,
-    TranslateGrid,
-    pad_field_in_j,
-)
+from fv3core.testing import MapSingleFactory, TranslateDycoreFortranData2Py
+from pace.stencils.testing import TranslateGrid, pad_field_in_j
 
 
 class TranslateMapScalar_2d(TranslateDycoreFortranData2Py):
@@ -80,5 +76,5 @@ class TranslateMapScalar_2d(TranslateDycoreFortranData2Py):
         inputs["qs"] = qs_field
         if inputs["qs"].shape[1] == 1:
             inputs["qs"] = utils.tile(inputs["qs"][:, 0], [self.nj, 1]).transpose(1, 0)
-        var_inout = self.compute_func(**inputs)
-        return self.slice_output(inputs, {"pt": var_inout})
+        self.compute_func(**inputs)
+        return self.slice_output(inputs, {"pt": inputs["q1"]})

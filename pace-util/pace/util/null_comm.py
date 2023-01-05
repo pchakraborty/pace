@@ -1,3 +1,4 @@
+import copy
 from typing import Any, Mapping
 
 from pace.util.comm import Comm, Request
@@ -57,6 +58,9 @@ class NullComm(Comm):
         if recvbuf is not None:
             recvbuf[:] = self._fill_value
 
+    def allgather(self, sendobj):
+        return [copy.deepcopy(sendobj) for _ in range(self.total_ranks)]
+
     def Send(self, sendbuf, dest, **kwargs):
         pass
 
@@ -68,6 +72,9 @@ class NullComm(Comm):
 
     def Irecv(self, recvbuf, source, **kwargs):
         return NullAsyncResult(recvbuf)
+
+    def sendrecv(self, sendbuf, dest, **kwargs):
+        return sendbuf
 
     def Split(self, color, key):
         # key argument is ignored, assumes we're calling the ranks from least to
@@ -83,3 +90,6 @@ class NullComm(Comm):
             comm.total_ranks = total_ranks
         self._split_comms[color].append(new_comm)
         return new_comm
+
+    def allreduce(self, sendobj, op=None) -> Any:
+        return self._fill_value

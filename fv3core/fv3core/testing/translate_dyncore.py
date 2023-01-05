@@ -125,6 +125,7 @@ class TranslateDynCore(ParallelTranslate2PyState):
         # TODO: Fix edge_interpolate4 in d2a2c_vect to match closer and the
         # variables here should as well.
         self.max_error = 2e-6
+        self.ignore_near_zero_errors["wsd"] = 1e-18
         self.stencil_factory = stencil_factory
         self.namelist = namelist
 
@@ -145,18 +146,6 @@ class TranslateDynCore(ParallelTranslate2PyState):
             grid_data.bk = inputs["bk"]
             grid_data.ptop = inputs["ptop"]
             grid_data.ks = inputs["ks"]
-        acoustic_dynamics = dyn_core.AcousticDynamics(
-            communicator,
-            self.stencil_factory,
-            grid_data,
-            self.grid.damping_coefficients,
-            self.grid.grid_type,
-            self.grid.nested,
-            self.grid.stretched_grid,
-            DynamicalCoreConfig.from_namelist(self.namelist).acoustic_dynamics,
-            inputs["pfull"],
-            inputs["phis"],
-        )
         self._base.make_storage_data_input_vars(inputs)
         state = DycoreState.init_zeros(quantity_factory=self.grid.quantity_factory)
         state.cappa = self.grid.quantity_factory.empty(
@@ -171,7 +160,21 @@ class TranslateDynCore(ParallelTranslate2PyState):
                 state[name].storage[selection] = value
             else:
                 setattr(state, name, value)
-        acoustic_dynamics(state)
+        acoustic_dynamics = dyn_core.AcousticDynamics(
+            comm=communicator,
+            stencil_factory=self.stencil_factory,
+            grid_data=grid_data,
+            damping_coefficients=self.grid.damping_coefficients,
+            grid_type=self.grid.grid_type,
+            nested=self.grid.nested,
+            stretched_grid=self.grid.stretched_grid,
+            config=DynamicalCoreConfig.from_namelist(self.namelist).acoustic_dynamics,
+            pfull=inputs["pfull"],
+            phis=inputs["phis"],
+            state=state,
+        )
+        state.__dict__.update(acoustic_dynamics._temporaries)
+        acoustic_dynamics(state, n_map=state.n_map, update_temporaries=False)
         storages_only = {}
         for name, value in vars(state).items():
             if isinstance(value, pace.util.Quantity):

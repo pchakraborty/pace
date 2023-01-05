@@ -16,8 +16,8 @@ enable_selective_validation()
 
 
 class TranslateDriver(TranslateFVDynamics):
-    def __init__(self, grids, namelist, stencil_factory):
-        super().__init__(grids[0], namelist, stencil_factory)
+    def __init__(self, grid, namelist, stencil_factory):
+        super().__init__(grid, namelist, stencil_factory)
         self.namelist: Namelist = namelist
         self.stencil_factory = stencil_factory
         self.stencil_config = self.stencil_factory.config
@@ -36,7 +36,7 @@ class TranslateDriver(TranslateFVDynamics):
         )
 
         quantity_factory = pace.util.QuantityFactory.from_backend(
-            sizer, backend=self.stencil_config.backend
+            sizer, backend=self.stencil_config.compilation_config.backend
         )
         physics_state = PhysicsState.init_zeros(
             quantity_factory=quantity_factory, active_packages=["microphysics"]

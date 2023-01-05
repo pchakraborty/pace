@@ -6,9 +6,17 @@ import xarray as xr
 
 import fv3core
 import fv3gfs.physics
+import pace.dsl.gt4py_utils as gt_utils
 import pace.util
 import pace.util.grid
+from pace.dsl.gt4py_utils import is_gpu_backend
 from pace.util.grid import DampingCoefficients
+
+
+try:
+    import cupy as cp
+except ImportError:
+    cp = None
 
 
 @dataclasses.dataclass()
@@ -85,7 +93,7 @@ class DriverState:
             tile_rank=communicator.tile.rank,
         )
         quantity_factory = pace.util.QuantityFactory.from_backend(
-            sizer, backend=driver_config.stencil_config.backend
+            sizer, backend=driver_config.stencil_config.compilation_config.backend
         )
         state = _restart_driver_state(
             restart_path, communicator.rank, quantity_factory, communicator
@@ -138,6 +146,7 @@ def _overwrite_state_from_restart(
     rank: int,
     state: Union[fv3core.DycoreState, fv3gfs.physics.PhysicsState, TendencyState],
     restart_file_prefix: str,
+    is_gpu_backend: bool,
 ):
     """
     Args:
@@ -152,7 +161,17 @@ def _overwrite_state_from_restart(
     df = xr.open_dataset(path + f"/{restart_file_prefix}_{rank}.nc")
     for _field in fields(type(state)):
         if "units" in _field.metadata.keys():
-            state.__dict__[_field.name].data[:] = df[_field.name].data[:]
+            if is_gpu_backend:
+                if "physics" in restart_file_prefix:
+                    state.__dict__[_field.name][:] = gt_utils.asarray(
+                        df[_field.name].data[:], to_type=cp.ndarray
+                    )
+                else:
+                    state.__dict__[_field.name].data[:] = gt_utils.asarray(
+                        df[_field.name].data[:], to_type=cp.ndarray
+                    )
+            else:
+                state.__dict__[_field.name].data[:] = df[_field.name].data[:]
     return state
 
 
@@ -169,15 +188,24 @@ def _restart_driver_state(
     damping_coefficients = DampingCoefficients.new_from_metric_terms(metric_terms)
     driver_grid_data = pace.util.grid.DriverGridData.new_from_metric_terms(metric_terms)
     dycore_state = fv3core.DycoreState.init_zeros(quantity_factory=quantity_factory)
+    backend_uses_gpu = is_gpu_backend(dycore_state.u.metadata.gt4py_backend)
     dycore_state = _overwrite_state_from_restart(
-        path, rank, dycore_state, "restart_dycore_state"
+        path,
+        rank,
+        dycore_state,
+        "restart_dycore_state",
+        backend_uses_gpu,
     )
     active_packages = ["microphysics"]
     physics_state = fv3gfs.physics.PhysicsState.init_zeros(
         quantity_factory=quantity_factory, active_packages=active_packages
     )
     physics_state = _overwrite_state_from_restart(
-        path, rank, physics_state, "restart_physics_state"
+        path,
+        rank,
+        physics_state,
+        "restart_physics_state",
+        backend_uses_gpu,
     )
     physics_state.__post_init__(quantity_factory, active_packages)
     tendency_state = TendencyState.init_zeros(

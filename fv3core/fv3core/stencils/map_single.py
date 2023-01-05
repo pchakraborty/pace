@@ -5,6 +5,7 @@ from gt4py.gtscript import FORWARD, PARALLEL, computation, interval
 import pace.dsl.gt4py_utils as utils
 from fv3core.stencils.basic_operations import copy_defn
 from fv3core.stencils.remap_profile import RemapProfile
+from pace.dsl.dace import orchestrate
 from pace.dsl.stencil import StencilFactory
 from pace.dsl.typing import FloatField, FloatFieldIJ, IntFieldIJ  # noqa: F401
 
@@ -94,6 +95,11 @@ class MapSingle:
         j1: int,
         j2: int,
     ):
+        orchestrate(
+            obj=self,
+            config=stencil_factory.config.dace_config,
+        )
+
         # TODO: consider refactoring to take in origin and domain
         grid_indexing = stencil_factory.grid_indexing
         shape = grid_indexing.domain_full(add=(1, 1, 1))
@@ -168,27 +174,38 @@ class MapSingle:
             qs (in): Bottom boundary condition
             qmin (in): Minimum allowed value of the remapped field
         """
-        if qs is None:
-            qs = self._tmp_qs
+
         self._copy_stencil(q1, self._q4_1)
         self._set_dp(self._dp1, pe1, self._lev)
-        q4_1, q4_2, q4_3, q4_4 = self._remap_profile(
-            qs,
-            self._q4_1,
-            self._q4_2,
-            self._q4_3,
-            self._q4_4,
-            self._dp1,
-            qmin,
-        )
+
+        if qs is None:
+            self._remap_profile(
+                self._tmp_qs,
+                self._q4_1,
+                self._q4_2,
+                self._q4_3,
+                self._q4_4,
+                self._dp1,
+                qmin,
+            )
+        else:
+            self._remap_profile(
+                qs,
+                self._q4_1,
+                self._q4_2,
+                self._q4_3,
+                self._q4_4,
+                self._dp1,
+                qmin,
+            )
         self._lagrangian_contributions(
             q1,
             pe1,
             pe2,
-            q4_1,
-            q4_2,
-            q4_3,
-            q4_4,
+            self._q4_1,
+            self._q4_2,
+            self._q4_3,
+            self._q4_4,
             self._dp1,
             self._lev,
         )

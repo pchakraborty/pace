@@ -16,10 +16,12 @@ hypothesis
 scipy
 pytest-regressions
 gitpython
-git+https://github.com/VulcanClimateModeling/fv3config.git@a0799928824a4f10617cf4615e8837c81ccb1f2d
+fv3config>=0.9.0
 
 # GT4Py Tests
 factory-boy
 pytest-factoryboy
 pytest-cache
 pytest-cov
+
+-r requirements_dace.txt

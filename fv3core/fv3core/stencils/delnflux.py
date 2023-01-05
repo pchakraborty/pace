@@ -13,6 +13,7 @@ from gt4py.gtscript import (
 )
 
 import pace.dsl.gt4py_utils as utils
+from pace.dsl.dace.orchestration import orchestrate
 from pace.dsl.stencil import StencilFactory, get_stencils_with_varied_bounds
 from pace.dsl.typing import FloatField, FloatFieldIJ, FloatFieldK
 from pace.util import X_DIM, Y_DIM, Z_DIM
@@ -951,6 +952,10 @@ class DelnFlux:
 
         nord and damp_c define the damping coefficient used in DelnFluxNoSG
         """
+        orchestrate(
+            obj=self,
+            config=stencil_factory.config.dace_config,
+        )
         self._no_compute = False
         if (damp_c <= 1e-4).all():
             self._no_compute = True
@@ -976,7 +981,8 @@ class DelnFlux:
             shape, backend=stencil_factory.backend
         )
         self._d2 = utils.make_storage_from_shape(
-            grid_indexing.domain_full(), backend=stencil_factory.backend
+            grid_indexing.domain_full(),
+            backend=stencil_factory.backend,
         )
 
         damping_factor_calculation = stencil_factory.from_origin_domain(
@@ -1021,10 +1027,15 @@ class DelnFlux:
         if self._no_compute is True:
             return fx, fy
 
+        # [DaCe] Optional d2 gets reduced to subset 0 in DaCe parsing leading to a
+        # parsing error
+        # Original code:
+        # if d2 is None:
+        #     d2 = self._d2
         if d2 is None:
-            d2 = self._d2
-
-        self.delnflux_nosg(q, self._fx2, self._fy2, self._damp, d2, mass)
+            self.delnflux_nosg(q, self._fx2, self._fy2, self._damp, self._d2, mass)
+        else:
+            self.delnflux_nosg(q, self._fx2, self._fy2, self._damp, d2, mass)
 
         if mass is None:
             self._add_diffusive_stencil(fx, self._fx2, fy, self._fy2)
@@ -1060,6 +1071,10 @@ class DelnFluxNoSG:
         nord = 1:   del-4
         nord = 2:   del-6
         """
+        orchestrate(
+            obj=self,
+            config=stencil_factory.config.dace_config,
+        )
         grid_indexing = stencil_factory.grid_indexing
         self._del6_u = damping_coefficients.del6_u
         self._del6_v = damping_coefficients.del6_v
@@ -1177,9 +1192,6 @@ class DelnFluxNoSG:
         corner_domain = corner_domain[:2] + (nk,)
         corner_axis_offsets = grid_indexing.axis_offsets(corner_origin, corner_domain)
 
-        self._corner_tmp = utils.make_storage_from_shape(
-            corner_domain, origin=corner_origin, backend=stencil_factory.backend
-        )
         self._copy_corners_x_nord = stencil_factory.from_origin_domain(
             copy_corners_x_nord,
             externals={**corner_axis_offsets, **nord_dictionary},

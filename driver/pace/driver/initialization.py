@@ -1,5 +1,6 @@
 import abc
 import dataclasses
+import logging
 from datetime import datetime
 from typing import ClassVar
 
@@ -14,13 +15,18 @@ import pace.stencils
 import pace.util
 import pace.util.grid
 from fv3core.testing import TranslateFVDynamics
+from pace.dsl.dace.orchestration import DaceConfig
 from pace.dsl.stencil import StencilFactory
+from pace.dsl.stencil_config import CompilationConfig
 from pace.stencils.testing import TranslateGrid
 from pace.util.grid import DampingCoefficients
 from pace.util.namelist import Namelist
 
 from .registry import Registry
 from .state import DriverState, TendencyState, _restart_driver_state
+
+
+logger = logging.getLogger(__name__)
 
 
 class Initializer(abc.ABC):
@@ -192,11 +198,13 @@ class SerialboxConfig(Initializer):
         backend: str,
     ):
         if self.serialized_grid:
+            logger.info("Using serialized grid data")
             grid = self._get_serialized_grid(communicator, backend)
             grid_data = grid.grid_data
             driver_grid_data = grid.driver_grid_data
             damping_coeff = grid.damping_coefficients
         else:
+            logger.info("Using a grid generated from metric terms")
             grid = pace.stencils.testing.grid.Grid.with_data_from_namelist(
                 self._namelist, communicator, backend
             )
@@ -259,7 +267,18 @@ class SerialboxConfig(Initializer):
         )
         ser = self._serializer(communicator)
         savepoint_in = ser.get_savepoint("Driver-In")[0]
-        stencil_config = pace.dsl.stencil.StencilConfig(backend=backend)
+        dace_config = DaceConfig(
+            communicator,
+            backend,
+            tile_nx=self._namelist.npx,
+            tile_nz=self._namelist.npz,
+        )
+        stencil_config = pace.dsl.stencil.StencilConfig(
+            compilation_config=CompilationConfig(
+                backend=backend, communicator=communicator
+            ),
+            dace_config=dace_config,
+        )
         stencil_factory = StencilFactory(
             config=stencil_config, grid_indexing=grid.grid_indexing
         )

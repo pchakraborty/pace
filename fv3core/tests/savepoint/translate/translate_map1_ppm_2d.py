@@ -5,12 +5,8 @@ import numpy as np
 import pace.dsl
 import pace.dsl.gt4py_utils as utils
 import pace.util
-from fv3core.testing import MapSingleFactory
-from pace.stencils.testing import (
-    TranslateDycoreFortranData2Py,
-    TranslateGrid,
-    pad_field_in_j,
-)
+from fv3core.testing import MapSingleFactory, TranslateDycoreFortranData2Py
+from pace.stencils.testing import TranslateGrid, pad_field_in_j
 
 
 class TranslateSingleJ(TranslateDycoreFortranData2Py):
@@ -103,8 +99,8 @@ class TranslateMap1_PPM_2d(TranslateDycoreFortranData2Py):
                     )
                 )
         del inputs["j_2d"]
-        var_inout = self.compute_func(**inputs)
-        return self.slice_output(inputs, {"var_inout": var_inout})
+        self.compute_func(**inputs)
+        return self.slice_output(inputs, {"var_inout": inputs["q1"]})
 
 
 class TranslateMap1_PPM_2d_3(TranslateMap1_PPM_2d):

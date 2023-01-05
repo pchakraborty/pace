@@ -8,6 +8,7 @@ import pace.stencils.corners as corners
 from fv3core.stencils.delnflux import DelnFlux
 from fv3core.stencils.xppm import XPiecewiseParabolic
 from fv3core.stencils.yppm import YPiecewiseParabolic
+from pace.dsl.dace.orchestration import orchestrate
 from pace.dsl.stencil import StencilFactory
 from pace.dsl.typing import FloatField, FloatFieldIJ
 from pace.util.grid import DampingCoefficients, GridData
@@ -134,6 +135,11 @@ class FiniteVolumeTransport:
         nord=None,
         damp_c=None,
     ):
+        orchestrate(
+            obj=self,
+            config=stencil_factory.config.dace_config,
+        )
+
         # use a shorter alias for grid_indexing here to avoid very verbose lines
         idx = stencil_factory.grid_indexing
         self._area = grid_data.area
@@ -141,7 +147,9 @@ class FiniteVolumeTransport:
 
         def make_storage():
             return utils.make_storage_from_shape(
-                idx.max_shape, origin=origin, backend=stencil_factory.backend
+                idx.max_shape,
+                origin=origin,
+                backend=stencil_factory.backend,
             )
 
         self._q_advected_y = make_storage()
@@ -150,7 +158,6 @@ class FiniteVolumeTransport:
         self._q_y_advected_mean = make_storage()
         self._q_advected_x_y_advected_mean = make_storage()
         self._q_advected_y_x_advected_mean = make_storage()
-
         self._nord = nord
         self._damp_c = damp_c
         ord_outer = hord
@@ -167,8 +174,9 @@ class FiniteVolumeTransport:
                 damp_c=self._damp_c,
             )
         else:
+            # This triggers dace parsing error:
+            # self.delnflux = None
             self._do_delnflux = False
-            self.delnflux = None
 
         self._copy_corners_y: corners.CopyCorners = corners.CopyCorners(
             "y", stencil_factory

@@ -13,6 +13,8 @@ import pace.util as util
 from fv3core._config import DynamicalCoreConfig
 from fv3core.stencils.dyn_core import AcousticDynamics
 from fv3core.testing import TranslateDynCore
+from pace.dsl.dace.orchestration import DaceConfig
+from pace.dsl.stencil import CompilationConfig
 from pace.stencils.testing.grid import Grid
 from pace.util.null_comm import NullComm
 
@@ -144,10 +146,17 @@ def driver(
             disable_halo_exchange, layout=layout
         )
         grid = Grid.with_data_from_namelist(dycore_config, communicator, backend)
+        dace_config = DaceConfig(
+            communicator,
+            backend,
+            tile_nx=dycore_config.npx,
+            tile_nz=dycore_config.npz,
+        )
         stencil_config = pace.dsl.stencil.StencilConfig(
-            backend=backend,
-            rebuild=False,
-            validate_args=True,
+            compilation_config=CompilationConfig(
+                backend=backend, rebuild=False, validate_args=True
+            ),
+            dace_config=dace_config,
         )
         stencil_factory = pace.dsl.stencil.StencilFactory(
             config=stencil_config,
@@ -157,6 +166,9 @@ def driver(
         experiment_name = get_experiment_name(data_directory)
         nested = False
         stretched_grid = False
+
+        state = get_state_from_input(grid, dycore_config, stencil_config, input_data)
+
         acoustics_object = AcousticDynamics(
             communicator,
             stencil_factory,
@@ -168,14 +180,16 @@ def driver(
             dycore_config.acoustic_dynamics,
             input_data["pfull"],
             input_data["phis"],
+            state,
         )
-
-        state = get_state_from_input(grid, dycore_config, stencil_config, input_data)
 
         # warm-up timestep.
         # We're intentionally not passing the timer here to exclude
         # warmup/compilation from the internal timers
-        acoustics_object(**state)
+        acoustics_object(
+            state,
+            n_map=state["n_map"],
+        )
 
     # we set up a specific timer for each timestep
     # that is cleared after so we get individual statistics
@@ -184,7 +198,7 @@ def driver(
         # but make performance numbers comparable with FVDynamics
         for _ in range(dycore_config.k_split):
             with timestep_timer.clock("DynCore"):
-                acoustics_object(**state)
+                acoustics_object(state, n_map=state["n_map"])
         times_per_step, hits_per_step = read_and_reset_timer(
             timestep_timer, times_per_step, hits_per_step
         )
