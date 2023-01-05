@@ -1002,50 +1002,47 @@ class DGridShallowWaterLagrangianDynamics:
             cx, cy, mfx, mfy, crx, cry, self._tmp_fx, self._tmp_fy
         )
 
-        if not self.hydrostatic:
+        # TODO: output value for tmp_wk here is never used, refactor so it is
+        # not unnecessarily computed
+        self.delnflux_nosg_w(
+            w,
+            self._tmp_fx2,
+            self._tmp_fy2,
+            self._delnflux_damp_w,
+            self._tmp_wk,
+        )
+        self._heat_diss_stencil(
+            self._tmp_fx2,
+            self._tmp_fy2,
+            w,
+            self.grid_data.rarea,
+            self._tmp_heat_s,
+            self._tmp_diss_e, # diss_est,
+            self._tmp_dw,
+            self._column_namelist["damp_w"],
+            self._column_namelist["ke_bg"],
+            dt,
+        )
 
-            # TODO: output value for tmp_wk here is never used, refactor so it is
-            # not unnecessarily computed
-            self.delnflux_nosg_w(
-                w,
-                self._tmp_fx2,
-                self._tmp_fy2,
-                self._delnflux_damp_w,
-                self._tmp_wk,
-            )
+        self.fvtp2d_vt_nodelnflux(
+            w,
+            crx,
+            cry,
+            xfx,
+            yfx,
+            self._tmp_gx,
+            self._tmp_gy,
+            x_mass_flux=self._tmp_fx,
+            y_mass_flux=self._tmp_fy,
+        )
 
-            self._heat_diss_stencil(
-                self._tmp_fx2,
-                self._tmp_fy2,
-                w,
-                self.grid_data.rarea,
-                self._tmp_heat_s,
-                self._tmp_diss_e, # diss_est,
-                self._tmp_dw,
-                self._column_namelist["damp_w"],
-                self._column_namelist["ke_bg"],
-                dt,
-            )
-
-            self.fvtp2d_vt_nodelnflux(
-                w,
-                crx,
-                cry,
-                xfx,
-                yfx,
-                self._tmp_gx,
-                self._tmp_gy,
-                x_mass_flux=self._tmp_fx,
-                y_mass_flux=self._tmp_fy,
-            )
-
-            self._flux_adjust_stencil(
-                w,
-                delp,
-                self._tmp_gx,
-                self._tmp_gy,
-                self.grid_data.rarea,
-            )
+        self._flux_adjust_stencil(
+            w,
+            delp,
+            self._tmp_gx,
+            self._tmp_gy,
+            self.grid_data.rarea,
+        )
         # Fortran: #ifdef USE_COND
         self.fvtp2d_dp_t(
             q_con,
@@ -1171,7 +1168,6 @@ class DGridShallowWaterLagrangianDynamics:
             self._delnflux_damp_vt,
             self._tmp_vort,
         )
-
         # TODO(eddied): These stencils were split to ensure GTC verification
         self._heat_source_from_vorticity_damping_stencil(
             self._vort_x_delta,
