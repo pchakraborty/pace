@@ -8,14 +8,14 @@ from typing import Literal, Tuple
 import pytest
 
 import pace.dsl
-from fv3core.utils.null_comm import NullComm
+from pace.driver import CreatesComm, Driver, DriverConfig
 from pace.driver.report import (
     TimeReport,
     gather_hit_counts,
     gather_timing_data,
     get_sypd,
 )
-from pace.driver.run import Driver, DriverConfig
+from pace.util.null_comm import NullComm
 
 
 def get_driver_config(
@@ -44,13 +44,28 @@ def get_driver_config(
         minutes=minutes,
         seconds=seconds,
         layout=layout,
-        initialization_type="baroclinic",
-        initialization_config=initialization_config,
+        initialization=initialization_config,
         performance_config=unittest.mock.MagicMock(),
+        comm_config=NullCommConfig(layout),
         diagnostics_config=unittest.mock.MagicMock(),
-        dycore_config=unittest.mock.MagicMock(),
+        dycore_config=unittest.mock.MagicMock(fv_sg_adj=1),
         physics_config=unittest.mock.MagicMock(),
     )
+
+
+class NullCommConfig(CreatesComm):
+    def __init__(self, layout):
+        self.layout = layout
+
+    def get_comm(self):
+        return NullComm(
+            rank=0,
+            total_ranks=6 * self.layout[0] * self.layout[1],
+            fill_value=0.0,
+        )
+
+    def cleanup(self, comm):
+        pass
 
 
 @pytest.mark.parametrize(
@@ -85,15 +100,9 @@ def test_driver(timestep: timedelta, minutes: int):
         minutes=minutes,
     )
     n_timesteps = math.ceil((minutes * 60) / timestep.total_seconds())
-    comm = NullComm(
-        rank=0,
-        total_ranks=6 * config.layout[0] * config.layout[1],
-        fill_value=0.0,
-    )
     with mocked_components() as mock:
         driver = Driver(
             config=config,
-            comm=comm,
         )
         driver.step_all()
     assert driver.dycore.step_dynamics.call_count == n_timesteps
@@ -101,7 +110,7 @@ def test_driver(timestep: timedelta, minutes: int):
     # we store an extra step at the start of the run
     assert driver.diagnostics.store.call_count == n_timesteps
     assert driver.dycore_to_physics.call_count == n_timesteps
-    assert driver.physics_to_dycore.call_count == n_timesteps
+    assert driver.end_of_step_update.call_count == n_timesteps
 
 
 test_data = [
@@ -181,7 +190,7 @@ class MockedComponents:
     physics: unittest.mock.MagicMock
     diagnostics: unittest.mock.MagicMock
     dycore_to_physics: unittest.mock.MagicMock
-    physics_to_dycore: unittest.mock.MagicMock
+    end_of_step_update: unittest.mock.MagicMock
 
 
 @contextlib.contextmanager
@@ -190,12 +199,12 @@ def mocked_components():
         with unittest.mock.patch("fv3gfs.physics.Physics") as physics_mock:
             with unittest.mock.patch(
                 "pace.stencils.update_atmos_state.UpdateAtmosphereState"
-            ) as physics_to_dycore_mock:
+            ) as end_of_step_update_mock:
                 with unittest.mock.patch(
                     "pace.stencils.update_atmos_state.DycoreToPhysics"
                 ) as dycore_to_physics_mock:
                     with unittest.mock.patch(
-                        "pace.driver.run.Diagnostics"
+                        "pace.driver.diagnostics.Diagnostics"
                     ) as diagnostics_mock:
                         with unittest.mock.patch(
                             "fv3core.DynamicalCore.step_dynamics"
@@ -206,5 +215,5 @@ def mocked_components():
                                 physics=physics_mock,
                                 diagnostics=diagnostics_mock,
                                 dycore_to_physics=dycore_to_physics_mock,
-                                physics_to_dycore=physics_to_dycore_mock,
+                                end_of_step_update=end_of_step_update_mock,
                             )

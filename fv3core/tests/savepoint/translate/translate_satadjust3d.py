@@ -1,8 +1,8 @@
 from fv3core.stencils.saturation_adjustment import SatAdjust3d
-from pace.stencils.testing import TranslateFortranData2Py
+from pace.stencils.testing import TranslateDycoreFortranData2Py
 
 
-class TranslateSatAdjust3d(TranslateFortranData2Py):
+class TranslateSatAdjust3d(TranslateDycoreFortranData2Py):
     def __init__(self, grid, namelist, stencil_factory):
         super().__init__(grid, namelist, stencil_factory)
         self.in_vars["data_vars"] = {
@@ -57,11 +57,13 @@ class TranslateSatAdjust3d(TranslateFortranData2Py):
 
     def compute_from_storage(self, inputs):
         inputs["kmp"] -= 1
+        inputs["last_step"] = bool(inputs["last_step"])
+        inputs["fast_mp_consv"] = bool(inputs["fast_mp_consv"])
         satadjust3d_obj = SatAdjust3d(
             self.stencil_factory,
             self.namelist.sat_adjust,
             self.grid.area_64,
-            inputs["kmp"],
+            int(inputs["kmp"]),
         )
         satadjust3d_obj(**inputs)
         return inputs

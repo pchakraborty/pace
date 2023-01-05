@@ -31,8 +31,8 @@ SAVE_ARTIFACTS="true"
 if [ "$1" == "profile" ] ; then
     DO_PROFILE="true"
 fi
-# Extra run in 'gtcuda' with nsys
-if [ "${DO_PROFILE}" == "true" ] && [ "${backend}" == "gtcuda" ] ; then
+# Extra run in 'cuda' with nsys
+if [ "${DO_PROFILE}" == "true" ] && [ "${backend}" == "cuda" ] ; then
     DO_NSYS_RUN="true"
 fi
 if [ "$1" == "build_cache" ] ; then
@@ -63,7 +63,7 @@ fi
 # Could parse from namelist, ranks = 6 * layout[0] * layout[1]
 RANKS=`echo ${experiment} | grep -o -E '[0-9]+ranks' | grep -o -E '[0-9]+'`
 BENCHMARK_DIR=${ROOT_DIR}/examples/standalone/benchmarks
-DATA_DIR="/project/s1053/fv3core_serialized_test_data/${DATA_VERSION}/${experiment}"
+DATA_DIR="/project/s1053/fv3core_serialized_test_data/${DATA_VERSION}/${experiment}/driver"
 ARTIFACT_ROOT="/project/s1053/performance/"
 TIMING_DIR="${ARTIFACT_ROOT}/fv3core_performance/${backend}"
 PROFILE_DIR="${ARTIFACT_ROOT}/fv3core_profile/${backend}"

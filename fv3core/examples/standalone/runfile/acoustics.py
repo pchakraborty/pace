@@ -13,8 +13,8 @@ import pace.util as util
 from fv3core._config import DynamicalCoreConfig
 from fv3core.stencils.dyn_core import AcousticDynamics
 from fv3core.testing import TranslateDynCore
-from fv3core.utils.null_comm import NullComm
 from pace.stencils.testing.grid import Grid
+from pace.util.null_comm import NullComm
 
 
 try:
@@ -125,7 +125,7 @@ def read_and_reset_timer(timestep_timer, times_per_step, hits_per_step):
 @click.command()
 @click.argument("data_directory", required=True, nargs=1)
 @click.argument("time_steps", required=False, default="1")
-@click.argument("backend", required=False, default="gtc:gt:cpu_ifirst")
+@click.argument("backend", required=False, default="gt:cpu_ifirst")
 @click.option("--disable_halo_exchange/--no-disable_halo_exchange", default=False)
 @click.option("--print_timings/--no-print_timings", default=True)
 def driver(

@@ -14,7 +14,6 @@ from pace.dsl.stencil import (
     _convert_quantities_to_storage,
 )
 from pace.dsl.typing import FloatField
-from pace.util.global_config import set_backend
 
 
 @contextlib.contextmanager
@@ -225,8 +224,8 @@ def test_frozen_stencil_kwargs_passed_to_init(
     mock_stencil.assert_called_once_with(
         definition=copy_stencil,
         externals={},
-        name="main.test_stencil_wrapper.copy_stencil",
-        **config.stencil_kwargs,
+        name="test_stencil_wrapper.copy_stencil",
+        **config.stencil_kwargs(),
     )
 
 
@@ -252,7 +251,7 @@ def test_frozen_field_after_parameter(backend):
     )
 
 
-@pytest.mark.parametrize("backend", ("numpy", "gtc:cuda"))
+@pytest.mark.parametrize("backend", ("numpy", "cuda"))
 @pytest.mark.parametrize("rebuild", [True])
 @pytest.mark.parametrize("validate_args", [True])
 def test_backend_options(
@@ -261,23 +260,25 @@ def test_backend_options(
     validate_args: bool,
 ):
     expected_options = {
-        "numpy": {"backend": "numpy", "rebuild": True, "format_source": False},
-        "gtc:cuda": {
-            "backend": "gtc:cuda",
+        "numpy": {
+            "backend": "numpy",
+            "rebuild": True,
+            "format_source": False,
+        },
+        "cuda": {
+            "backend": "cuda",
             "rebuild": True,
             "device_sync": False,
             "format_source": False,
-            "skip_passes": ["graph_merge_horizontal_executions"],
             "verbose": False,
         },
     }
 
-    set_backend(backend)
     stencil_kwargs = StencilConfig(
         backend=backend,
         rebuild=rebuild,
         validate_args=validate_args,
-    ).stencil_kwargs
+    ).stencil_kwargs()
     assert stencil_kwargs == expected_options[backend]
 
 
