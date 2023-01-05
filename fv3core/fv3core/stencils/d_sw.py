@@ -90,18 +90,17 @@ def heat_diss(
         w (in):
         rarea (in):
         heat_source (out):
-        diss_est (inout):
+        diss_est (out):
         dw (inout):
         damp_w (in):
         ke_bg (in):
     """
     with computation(PARALLEL), interval(...):
-        diss_e = diss_est  # TODO: can this be deleted, using diss_est below?
         if damp_w > 1e-5:
             dd8 = ke_bg * abs(dt)
             dw = (fx2 - fx2[1, 0, 0] + fy2 - fy2[0, 1, 0]) * rarea
             heat_source = dd8 - dw * (w + 0.5 * dw)
-            diss_est = diss_e + heat_source
+            diss_est = heat_source
 
 
 @gtscript.function
@@ -496,7 +495,6 @@ def heat_source_from_vorticity_damping(
     rdx: FloatFieldIJ,
     rdy: FloatFieldIJ,
     heat_source: FloatField,
-    heat_source_total: FloatField,
     dissipation_estimate: FloatField,
     kinetic_energy_fraction_to_damp: FloatFieldK,
 ):
@@ -516,8 +514,7 @@ def heat_source_from_vorticity_damping(
         rdy (in): 1 / dy
         heat_source (inout): heat source from vorticity damping
             implied by energy conservation
-        heat_source_total (inout): accumulated heat source
-        dissipation_estimate (out): dissipation estimate, only calculated if
+        dissipation_estimate (inout): dissipation estimate, only calculated if
             calculate_dissipation_estimate is 1
         kinetic_energy_fraction_to_damp (in): according to its comment in fv_arrays,
             the fraction of kinetic energy to explicitly damp and convert into heat.
@@ -548,11 +545,20 @@ def heat_source_from_vorticity_damping(
 
         if __INLINED((d_con > dcon_threshold) or do_skeb):
             with horizontal(region[local_is : local_ie + 1, local_js : local_je + 1]):
-                heat_source_total = heat_source_total + heat_source
                 # TODO: do_skeb could be renamed to calculate_dissipation_estimate
                 if __INLINED(do_skeb):
                     dissipation_estimate -= dampterm
 
+def accumulate_heat_source_and_dissipation_estimate(
+    heat_source: FloatField,
+    heat_source_total: FloatField,
+    diss_est: FloatField,
+    diss_est_total: FloatField,
+):
+    with computation(PARALLEL), interval(...):
+        # with horizontal(region[local_is : local_ie + 1, local_js : local_je + 1]):
+        heat_source_total = heat_source_total + heat_source
+        diss_est_total = diss_est_total + diss_est
 
 # TODO(eddied): Had to split this into a separate stencil to get this to validate
 #               with GTC, suspect a merging issue...
@@ -750,6 +756,7 @@ class DGridShallowWaterLagrangianDynamics:
             )
 
         self._tmp_heat_s = make_storage()
+        self._tmp_diss_e = make_storage()
         self._vort_x_delta = make_storage()
         self._vort_y_delta = make_storage()
         self._tmp_ke = make_storage()
@@ -915,6 +922,13 @@ class DGridShallowWaterLagrangianDynamics:
                 },
             )
         )
+        self._accumulate_heat_source_and_dissipation_estimate_stencil = (
+            stencil_factory.from_dims_halo(
+                func=accumulate_heat_source_and_dissipation_estimate,
+                # compute_dims=[X_INTERFACE_DIM, Y_INTERFACE_DIM, Z_DIM],
+                compute_dims=[X_DIM, Y_DIM, Z_DIM],
+            )
+        )
         self._compute_vorticity_stencil = stencil_factory.from_dims_halo(
             compute_vorticity,
             compute_dims=[X_DIM, Y_DIM, Z_DIM],
@@ -1074,7 +1088,7 @@ class DGridShallowWaterLagrangianDynamics:
                 w,
                 self.grid_data.rarea,
                 self._tmp_heat_s,
-                diss_est,
+                self._tmp_diss_e, # diss_est,
                 self._tmp_dw,
                 self._column_namelist["damp_w"],
                 self._column_namelist["ke_bg"],
@@ -1259,11 +1273,15 @@ class DGridShallowWaterLagrangianDynamics:
             self.grid_data.rdx,
             self.grid_data.rdy,
             self._tmp_heat_s,
-            heat_source,
-            diss_est,
+            self._tmp_diss_e, #diss_est,
             self._column_namelist["d_con"],
         )
-
+        self._accumulate_heat_source_and_dissipation_estimate_stencil(
+            self._tmp_heat_s,
+            heat_source,
+            self._tmp_diss_e,
+            diss_est,
+        )
         self._update_u_and_v_stencil(
             self._tmp_ut,
             self._tmp_vt,

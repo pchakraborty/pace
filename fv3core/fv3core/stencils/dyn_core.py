@@ -43,6 +43,7 @@ def zero_data(
     mfyd: FloatField,
     cxd: FloatField,
     cyd: FloatField,
+    heat_source: FloatField,
     diss_estd: FloatField,
     first_timestep: bool,
 ):
@@ -52,6 +53,7 @@ def zero_data(
         mfyd (out):
         cxd (out):
         cyd (out):
+        heat_source (out):
         diss_estd (out):
         first_timestep (in):
     """
@@ -60,6 +62,7 @@ def zero_data(
         mfyd = 0.0
         cxd = 0.0
         cyd = 0.0
+        heat_source = 0.0
         if first_timestep:
             with horizontal(region[3:-3, 3:-3]):
                 diss_estd = 0.0
@@ -554,6 +557,7 @@ class AcousticDynamics:
             state.mfyd,
             state.cxd,
             state.cyd,
+            state.heat_source,
             state.diss_estd,
             state.n_map == 1,
         )
