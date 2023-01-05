@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -41,10 +42,13 @@ class _TimeChunkedVariable:
 
 class _ChunkedNetCDFWriter:
 
-    FILENAME_FORMAT = "state_{chunk:04d}.nc"
+    FILENAME_FORMAT = "state_{chunk:04d}_tile{tile}.nc"
 
-    def __init__(self, path: str, fs: fsspec.AbstractFileSystem, time_chunk_size: int):
+    def __init__(
+        self, path: str, tile: int, fs: fsspec.AbstractFileSystem, time_chunk_size: int
+    ):
         self._path = path
+        self._tile = tile
         self._fs = fs
         self._time_chunk_size = time_chunk_size
         self._i_time = 0
@@ -77,18 +81,21 @@ class _ChunkedNetCDFWriter:
             data_vars = {"time": (["time"], self._times)}
             for name, chunked in self._chunked.items():
                 data_vars[name] = xr.DataArray(
-                    to_numpy(chunked.data.view[:]),
+                    chunked.data.view[:],
                     dims=chunked.data.dims,
                     attrs=chunked.data.attrs,
-                )
+                ).expand_dims({"tile": [self._tile]}, axis=1)
             ds = xr.Dataset(data_vars=data_vars)
             chunk_index = self._i_time // self._time_chunk_size
             chunk_path = str(
                 Path(self._path)
-                / _ChunkedNetCDFWriter.FILENAME_FORMAT.format(chunk=chunk_index)
+                / _ChunkedNetCDFWriter.FILENAME_FORMAT.format(
+                    chunk=chunk_index, tile=self._tile
+                )
             )
-            with self._fs.open(chunk_path, "wb") as f:
-                ds.to_netcdf(f)
+            if os.path.exists(chunk_path):
+                os.remove(chunk_path)
+            ds.to_netcdf(chunk_path, format="NETCDF4", engine="netcdf4")
 
         self._chunked = None
         self._times.clear()
@@ -99,7 +106,7 @@ class NetCDFMonitor:
     sympl.Monitor-style object for storing model state dictionaries netCDF files.
     """
 
-    _CONSTANT_FILENAME = "constants.nc"
+    _CONSTANT_FILENAME = "constants"
 
     def __init__(
         self,
@@ -112,10 +119,10 @@ class NetCDFMonitor:
         Args:
             path: directory in which to store data
             communicator: provides global communication to gather state
-            filename_format: a string format for the filename. Must contain a
-                "chunk" field which will be replaced with the chunk number.
-            time_chunk_size: number of times
+            time_chunk_size: number of times per file
         """
+        rank = communicator.rank
+        self._tile_index = communicator.partitioner.tile_index(rank)
         self._path = path
         self._fs = get_fs(path)
         self._communicator = communicator
@@ -128,6 +135,7 @@ class NetCDFMonitor:
         if self.__writer is None:
             self.__writer = _ChunkedNetCDFWriter(
                 path=self._path,
+                tile=self._tile_index,
                 fs=self._fs,
                 time_chunk_size=self._time_chunk_size,
             )
@@ -155,39 +163,40 @@ class NetCDFMonitor:
                     set(state.keys()), self._expected_vars
                 )
             )
-        state = self._communicator.gather_state(state)
+        state = self._communicator.tile.gather_state(state, transfer_type=np.float32)
         if state is not None:  # we are on root rank
             self._writer.append(state)
 
     def store_constant(self, state: Dict[str, Quantity]) -> None:
-        state = self._communicator.gather_state(state)
+        state = self._communicator.gather_state(state, transfer_type=np.float32)
         if state is not None:  # we are on root rank
             constants_filename = str(
                 Path(self._path) / NetCDFMonitor._CONSTANT_FILENAME
             )
-            if self._fs.exists(constants_filename):
-                with self._fs.open(constants_filename, "rb") as f:
-                    ds = xr.open_dataset(f)
+            for name, quantity in state.items():
+                path_for_grid = constants_filename + "_" + name + ".nc"
+
+                if self._fs.exists(path_for_grid):
+                    ds = xr.open_dataset(path_for_grid)
                     ds = ds.load()
-                for name, quantity in state.items():
                     ds[name] = xr.DataArray(
-                        to_numpy(quantity.view[:]),
+                        quantity.view[:],
                         dims=quantity.dims,
                         attrs=quantity.attrs,
                     )
-            else:
-                ds = xr.Dataset(
-                    data_vars={
-                        name: xr.DataArray(
-                            to_numpy(value.view[:]),
-                            dims=value.dims,
-                            attrs=value.attrs,
-                        )
-                        for name, value in state.items()
-                    }
-                )
-            with self._fs.open(constants_filename, "wb") as f:
-                ds.to_netcdf(f)
+                else:
+                    ds = xr.Dataset(
+                        data_vars={
+                            name: xr.DataArray(
+                                quantity.view[:],
+                                dims=quantity.dims,
+                                attrs=quantity.attrs,
+                            )
+                        }
+                    )
+                if os.path.exists(path_for_grid):
+                    os.remove(path_for_grid)
+                ds.to_netcdf(path_for_grid, format="NETCDF4", engine="netcdf4")
 
     def cleanup(self):
         self._writer.flush()

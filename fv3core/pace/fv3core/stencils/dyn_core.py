@@ -32,8 +32,8 @@ from pace.fv3core.initialization.dycore_state import DycoreState
 from pace.fv3core.stencils.c_sw import CGridShallowWaterDynamics
 from pace.fv3core.stencils.del2cubed import HyperdiffusionDamping
 from pace.fv3core.stencils.pk3_halo import PK3Halo
-from pace.fv3core.stencils.riem_solver3 import RiemannSolver3
-from pace.fv3core.stencils.riem_solver_c import RiemannSolverC
+from pace.fv3core.stencils.riem_solver3 import NonhydrostaticVerticalSolver
+from pace.fv3core.stencils.riem_solver_c import NonhydrostaticVerticalSolverCGrid
 from pace.util import (
     X_DIM,
     X_INTERFACE_DIM,
@@ -152,8 +152,8 @@ def p_grad_c_stencil(
     """
     from __externals__ import hydrostatic
 
-    # TODO: reference derivation in SJ Lin 1997 paper,
-    # FV3 documentation section 6.6 (?)
+    # derivation in Lin 1997 https://doi.org/10.1002/qj.49712354214
+    # FV3 documentation Section 6.6
 
     with computation(PARALLEL), interval(...):
         if __INLINED(hydrostatic):
@@ -232,7 +232,7 @@ class AcousticDynamics:
             self,
             comm: pace.util.CubedSphereCommunicator,
             grid_indexing: GridIndexing,
-            backend: str,
+            quantity_factory: pace.util.QuantityFactory,
             state: DycoreState,
             cappa: pace.util.Quantity,
             gz: pace.util.Quantity,
@@ -241,44 +241,27 @@ class AcousticDynamics:
             heat_source: pace.util.Quantity,
             pkc: pace.util.Quantity,
         ):
-            origin = grid_indexing.origin_compute()
-            shape = grid_indexing.max_shape
             # Define the memory specification required
             # Those can be re-used as they are read-only descriptors
-            full_size_xyz_halo_spec = grid_indexing.get_quantity_halo_spec(
-                shape,
-                origin,
+            full_size_xyz_halo_spec = quantity_factory.get_quantity_halo_spec(
                 dims=[fv3util.X_DIM, fv3util.Y_DIM, fv3util.Z_DIM],
                 n_halo=grid_indexing.n_halo,
-                backend=backend,
             )
-            full_size_xyiz_halo_spec = grid_indexing.get_quantity_halo_spec(
-                shape,
-                origin,
+            full_size_xyiz_halo_spec = quantity_factory.get_quantity_halo_spec(
                 dims=[fv3util.X_DIM, fv3util.Y_INTERFACE_DIM, fv3util.Z_DIM],
                 n_halo=grid_indexing.n_halo,
-                backend=backend,
             )
-            full_size_xiyz_halo_spec = grid_indexing.get_quantity_halo_spec(
-                shape,
-                origin,
+            full_size_xiyz_halo_spec = quantity_factory.get_quantity_halo_spec(
                 dims=[fv3util.X_INTERFACE_DIM, fv3util.Y_DIM, fv3util.Z_DIM],
                 n_halo=grid_indexing.n_halo,
-                backend=backend,
             )
-            full_size_xyzi_halo_spec = grid_indexing.get_quantity_halo_spec(
-                shape,
-                origin,
+            full_size_xyzi_halo_spec = quantity_factory.get_quantity_halo_spec(
                 dims=[fv3util.X_DIM, fv3util.Y_DIM, fv3util.Z_INTERFACE_DIM],
                 n_halo=grid_indexing.n_halo,
-                backend=backend,
             )
-            full_size_xiyiz_halo_spec = grid_indexing.get_quantity_halo_spec(
-                shape,
-                origin,
+            full_size_xiyiz_halo_spec = quantity_factory.get_quantity_halo_spec(
                 dims=[fv3util.X_INTERFACE_DIM, fv3util.Y_INTERFACE_DIM, fv3util.Z_DIM],
                 n_halo=grid_indexing.n_halo,
-                backend=backend,
             )
 
             # Build the HaloUpdater. We could build one updater per specification group
@@ -337,12 +320,9 @@ class AcousticDynamics:
                 ["heat_source"],
             )
             if grid_indexing.domain[0] == grid_indexing.domain[1]:
-                full_3Dfield_2pts_halo_spec = grid_indexing.get_quantity_halo_spec(
-                    shape,
-                    origin,
+                full_3Dfield_2pts_halo_spec = quantity_factory.get_quantity_halo_spec(
                     dims=[fv3util.X_DIM, fv3util.Y_DIM, fv3util.Z_INTERFACE_DIM],
                     n_halo=2,
-                    backend=backend,
                 )
                 self.pkc = WrappedHaloUpdater(
                     comm.get_scalar_halo_updater([full_3Dfield_2pts_halo_spec]),
@@ -490,12 +470,12 @@ class AcousticDynamics:
                 hord_tm=config.hord_tm,
                 column_namelist=column_namelist,
             )
-            self.riem_solver3 = RiemannSolver3(
+            self.vertical_solver = NonhydrostaticVerticalSolver(
                 stencil_factory,
                 quantity_factory=quantity_factory,
                 config=config.riemann,
             )
-            self.riem_solver_c = RiemannSolverC(
+            self.vertical_solver_cgrid = NonhydrostaticVerticalSolverCGrid(
                 stencil_factory, quantity_factory=quantity_factory, p_fac=config.p_fac
             )
             origin, domain = grid_indexing.get_origin_domain(
@@ -518,22 +498,6 @@ class AcousticDynamics:
                 config=config.d_grid_shallow_water,
             )
         )
-
-        # TODO (floriand): Due to DaCe VRAM pooling creating a memory
-        # leak with the usage pattern of those two fields
-        # We use the C_SW internal to workaround it e.g.:
-        #  - self.cgrid_shallow_water_lagrangian_dynamics.delpc
-        #  - self.cgrid_shallow_water_lagrangian_dynamics.ptc
-        # DaCe has already a fix on their side and it awaits release
-        # issue
-        # self.delpc = utils.make_storage_from_shape(
-        #     grid_indexing.domain_full(add=(1, 1, 1)),
-        #     backend=stencil_factory.backend,
-        # )
-        # self.ptc = utils.make_storage_from_shape(
-        #     grid_indexing.domain_full(add=(1, 1, 1)),
-        #     backend=stencil_factory.backend,
-        # )
 
         self.cgrid_shallow_water_lagrangian_dynamics = CGridShallowWaterDynamics(
             stencil_factory,
@@ -609,8 +573,8 @@ class AcousticDynamics:
                 tau=config.tau,
                 hydrostatic=config.hydrostatic,
             )
-        self._compute_pkz_tempadjust = stencil_factory.from_origin_domain(
-            temperature_adjust.compute_pkz_tempadjust,
+        self._apply_diffusive_heating = stencil_factory.from_origin_domain(
+            temperature_adjust.apply_diffusive_heating,
             origin=grid_indexing.origin_compute(),
             domain=grid_indexing.restrict_vertical(
                 nk=self._nk_heat_dissipation
@@ -627,7 +591,7 @@ class AcousticDynamics:
         self._halo_updaters = AcousticDynamics._HaloUpdaters(
             comm,
             grid_indexing,
-            stencil_factory.backend,
+            quantity_factory,
             state,
             cappa=self.cappa,
             gz=self._gz,
@@ -824,7 +788,14 @@ class AcousticDynamics:
                 self.update_geopotential_height_on_c_grid(
                     self._zs, self._ut, self._vt, self._gz, self._ws3, dt2
                 )
-                self.riem_solver_c(
+                # TODO (floriand): Due to DaCe VRAM pooling creating a memory
+                # leak with the usage pattern of those two fields
+                # We use the C_SW internal to workaround it e.g.:
+                #  - self.cgrid_shallow_water_lagrangian_dynamics.delpc
+                #  - self.cgrid_shallow_water_lagrangian_dynamics.ptc
+                # DaCe has already a fix on their side and it awaits release
+                # issue
+                self.vertical_solver_cgrid(
                     dt2,
                     self.cappa,
                     self._ptop,
@@ -905,7 +876,7 @@ class AcousticDynamics:
                     ws=self._wsd,
                     dt=dt_acoustic_substep,
                 )
-                self.riem_solver3(
+                self.vertical_solver(
                     remap_step,
                     dt_acoustic_substep,
                     self.cappa,
@@ -994,13 +965,11 @@ class AcousticDynamics:
                 # TODO: it looks like state.pkz is being used as a temporary here,
                 # and overwritten at the start of remapping. See if we can make it
                 # an internal temporary of this stencil.
-                # this is really just applying the heating, rename it appropriately
-                self._compute_pkz_tempadjust(
+                self._apply_diffusive_heating(
                     state.delp,
                     state.delz,
                     self.cappa,
                     self._heat_source,
                     state.pt,
-                    state.pkz,
                     delt_time_factor,
                 )
